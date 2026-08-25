@@ -1,0 +1,7 @@
+{
+  "type": "plugin",
+  "runner": "node",
+  "owner": "anhuvdinh",
+  "name": "better-searxng-search",
+  "revision": 1
+}
