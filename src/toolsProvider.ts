@@ -1026,7 +1026,7 @@ export async function toolsProvider(
               }
             })
           );
-          console.log(`===================direct_url_search ${urls.length}`)
+
           return results.join("\n\n---\n\n");
         }
 
@@ -1209,7 +1209,7 @@ export async function toolsProvider(
             `Only ${accepted.length} usable sources were found. ` +
             `The next search page is ${currentNextPage}.`;
         }
-        console.log(`===================normal_search ${accepted.length}`)
+
         return output;
 
       } catch (error) {
