@@ -203,7 +203,21 @@ function extractTextNoQuery(html: string): string {
 function removeReferenceSectionsFromDocument(
   document: Document
 ): void {
-  
+  /*
+   * Normalize attribute/class names so different naming conventions
+   * can be matched consistently.
+   *
+   * Examples:
+   *   authorBio       -> author-bio
+   *   author_bio      -> author_bio
+   *   author-bio      -> author-bio
+   *   slice-container-authorBio -> slice-container-author-bio
+   */
+  const normalizeAttribute = (value: string): string =>
+    value
+      .replace(/([a-z])([A-Z])/g, "$1-$2")
+      .toLowerCase();
+
   const referenceAttributeRe = new RegExp(
     "(?:^|[-_ ])(?:" +
       [
@@ -233,6 +247,24 @@ function removeReferenceSectionsFromDocument(
         "additional[-_ ]materials?",
         "useful[-_ ]links?",
         "useful[-_ ]resources?",
+
+        // Author / bio
+        "author",
+        "authors",
+        "author[-_ ]?bio",
+        "author[-_ ]?biography",
+        "writer[-_ ]?bio",
+        "writer[-_ ]?biography",
+        "contributor[-_ ]?bio",
+        "contributor[-_ ]?biography",
+        "about[-_ ]the[-_ ]author",
+
+        // Comments
+        "comment",
+        "comments",
+        "discuss",
+        "discussion",
+        "discussions",
       ].join("|") +
       ")(?:$|[-_ ])",
     "i"
@@ -276,19 +308,32 @@ function removeReferenceSectionsFromDocument(
       "for\\s+further\\s+information",
       "useful\\s+links?",
       "useful\\s+resources?",
+
+      // Author / bio headings
+      "author",
+      "authors",
+      "about\\s+the\\s+author",
+      "about\\s+the\\s+authors",
+      "author\\s+bio",
+      "author\\s+biography",
+      "writer\\s+bio",
+      "writer\\s+biography",
+      "contributor\\s+bio",
+      "contributor\\s+biography",
+
+      // Comments
+      "comment",
+      "comments",
+      "discuss",
+      "discussion",
+      "discussions",
     ].join("|"),
     "i"
   );
 
   /*
    * 1. Remove elements whose id/class strongly identifies them
-   *    as reference/citation containers.
-   *
-   * Examples:
-   *   id="references"
-   *   class="references"
-   *   class="reflist"
-   *   id="bibliography"
+   *    as reference/citation/author containers.
    */
   const candidates = Array.from(
     document.querySelectorAll<HTMLElement>(
@@ -297,18 +342,20 @@ function removeReferenceSectionsFromDocument(
   );
 
   for (const element of candidates) {
-    const id = element.id || "";
+    const id = normalizeAttribute(element.id || "");
 
     const className =
       typeof element.className === "string"
-        ? element.className
+        ? normalizeAttribute(element.className)
         : "";
 
-    const ariaLabelledBy =
-      element.getAttribute("aria-labelledby") || "";
+    const ariaLabelledBy = normalizeAttribute(
+      element.getAttribute("aria-labelledby") || ""
+    );
 
-    const ariaLabel =
-      element.getAttribute("aria-label") || "";
+    const ariaLabel = normalizeAttribute(
+      element.getAttribute("aria-label") || ""
+    );
 
     if (
       referenceAttributeRe.test(id) ||
@@ -323,9 +370,6 @@ function removeReferenceSectionsFromDocument(
   /*
    * 2. Remove sections whose heading explicitly identifies
    *    them as references/bibliography/etc.
-   *
-   * This catches pages where the section doesn't have a
-   * useful id/class.
    */
   const headings = Array.from(
     document.querySelectorAll<HTMLElement>(
