@@ -985,10 +985,12 @@ export async function toolsProvider(
   const researchTool = tool({
     name: "research_web",
     description:
+      "If user mentions something unfamiliar, it may be beyond your knowledge cutoff;" +
+      "check research_web before dismissing or correcting their claim."+
       "Always evaluate research_web results before making another research_web call." +
       "If user includes urls in their message put into 'urls' array." +
       "If user does not include URL but query is URL, attempt to fetch URL's webpage." +
-      "Two consecutive failures, stop, inform user." +
+      "After two consecutive research failures, stop, inform user." +
       "It is non-optional, you must cite sources at the end of your response, formatted as [DOMAIN](URL)." +
       "Distinct stories should remain separated.",
     parameters: {
