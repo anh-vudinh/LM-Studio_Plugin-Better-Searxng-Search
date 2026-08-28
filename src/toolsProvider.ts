@@ -979,7 +979,7 @@ export async function toolsProvider(
   const waitCaptcha = config.get("waitCaptchaTimeout") as number;
   const fetchFullPage = config.get("fetchFullPage") as boolean;
   const checkCandidatesCount = config.get("checkCandidatesCount") as number;
-  const forceSnippets = config.get("forceSnippets") as boolean;
+  const snippetsModeSelect = config.get("snippetsModeSelect") as string;
   const budgetScaler = config.get("budgetScaler") as number;
 
   const researchTool = tool({
@@ -1041,7 +1041,7 @@ export async function toolsProvider(
         // ----------------------------------------------------------
         // User only wants snippets
         // ----------------------------------------------------------
-        if (forceSnippets){
+        if (snippetsModeSelect === "snippets_only"){
           candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout)
 
           if (candidates.length === 0) {

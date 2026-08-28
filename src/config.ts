@@ -79,14 +79,19 @@ export const configSchematics = createConfigSchematics()
     3000
   )
   .field(
-    "forceSnippets",
-    "boolean",
+    "snippetsModeSelect",
+    "select",
     {
-      displayName: "Snippets Only",
+      displayName: "Snippets Mode",
       subtitle:
-        "*Not Recommended* Enabling this will only fetch snippets",
+        "*Recommended* Snippets Fallback",
+        options: [
+          { value: "snippets_fallback", displayName: "Snippets Fallback" },
+          { value: "snippets_first", displayName: "Snippets First" },
+          { value: "snippets_only", displayName: "Snippets Only" },
+        ],
     },
-    false
+    "snippets_fallback"
   )
   .field(
     "fetchFullPage",
