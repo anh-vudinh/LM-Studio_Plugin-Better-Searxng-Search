@@ -87,8 +87,8 @@ export const configSchematics = createConfigSchematics()
         "*Recommended* Fallback or First",
         options: [
           { value: "snippets_fallback", displayName: "Fallback (Best)" },
-          { value: "snippets_first", displayName: "First (Good)" },
-          { value: "snippets_only", displayName: "Snippets (Worst)" },
+          { value: "snippets_first", displayName: "First Fetch, Return Best Match (Good)" },
+          { value: "snippets_only", displayName: "Snippets Only (Worst)" },
         ],
     },
     "snippets_fallback"

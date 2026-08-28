@@ -6,7 +6,9 @@ import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
 import createDOMPurify from "dompurify";
 
-//anhuvdinh
+/**
+ * https://github.com/anh-vudinh
+ */
 interface SearXNGResult {
   title: string;
   url: string;
@@ -39,22 +41,28 @@ interface RejectedSource {
 }
 
 // Research pipeline settings.
-let currentNextPage = 1;  //holding the nextpage number in memory if user requests model to continue pulling more results
+let currentNextPage = 1;  //holding the nextpage number outside of tool if user requests model to continue pulling more results
 
 /**
  * Pause before inspecting a successfully fetched page.
- *
  * This gives transient security/challenge pages a few seconds
  * to render before we decide whether the page is usable.
+ * -> Out: void
  */
-function sleep(ms: number): Promise<void> {
+function sleep(
+  ms: number
+): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Sets the character budget allowed based on quantity of sources user requested.
+ * - Out: number
  */
-async function getTotalBudget(sourceCount: number, budgetScaler: number) {
+function getTotalBudget(
+  sourceCount: number, 
+  budgetScaler: number
+) {
   if (sourceCount === 1) return 2000 * budgetScaler; //2000 per
   if (sourceCount === 2) return 3000 * budgetScaler; //1500 per
   if (sourceCount === 3) return 4000 * budgetScaler; //1333 per
@@ -64,9 +72,12 @@ async function getTotalBudget(sourceCount: number, budgetScaler: number) {
 }
 
 /**
- * Normalize text for challenge detection.
+ * Normalize text for challenge detection
+ * -> Out: string
  */
-function normalizeForDetection(text: string): string {
+function normalizeForDetection(
+  text: string
+): string {
   return text
     .toLowerCase()
     .replace(/\s+/g, " ")
@@ -74,15 +85,12 @@ function normalizeForDetection(text: string): string {
 }
 
 /**
- * Detect an ACTIVE human-verification page.
- *
- * We do NOT reject a page simply because it mentions:
- * Cloudflare, bot, security, CAPTCHA, verification, etc.
- *
- * We look for language indicating that the PAGE IS CURRENTLY
- * asking the visitor to complete human/bot verification.
+ * Detect an ACTIVE human-verification page
+ * -> Out: string or null
  */
-function detectActiveChallenge(text: string): string | null {
+function detectActiveChallenge(
+  text: string
+): string | null {
   const normalized = normalizeForDetection(text);
 
   const challengePatterns: Array<[RegExp, string]> = [
@@ -135,7 +143,8 @@ function detectActiveChallenge(text: string): string | null {
   const hasTurnstile = /\bturnstile\b/i.test(normalized);
   const hasChallengeContext = /\b(?:challenge|verification|verify|human|robot)\b/i.test(normalized);
 
-  if (explicitChallengeInstruction) return "active verification challenge detected";
+  if (explicitChallengeInstruction) 
+    return "active verification challenge detected";
   if (wordCount < 150 && ((hasCaptcha && hasChallengeContext) || (hasTurnstile && hasChallengeContext))) {
     return "active verification challenge detected";
   }
@@ -146,8 +155,12 @@ function detectActiveChallenge(text: string): string | null {
 /**
  * Uses Mozilla readability and other methods to clean up text of website
  * to feed to the model
+ * -> Out: string
  */
-function extractText(html: string, _query = ""): string {
+function extractText(
+  html: string, 
+  _query = ""
+): string {
   try {
     const dom = new JSDOM(html);
     const dirtyMarkup = dom.window.document.documentElement.outerHTML;
@@ -193,13 +206,21 @@ function extractText(html: string, _query = ""): string {
   }
 }
 
-function extractTextNoQuery(html: string): string {
+/**
+ * extractText but bypass need for a query
+ * Model finds URL itself and looks it up
+ * -> Out: string
+ */
+function extractTextNoQuery(
+  html: string
+): string {
   return extractText(html, "");
 }
 
 /**
  * Attempts to remove ending citations/references sections like from Wikipedia or books
  * To clean them out before they are counted against the budget
+ * -> Out: void
  */
 function removeReferenceSectionsFromDocument(
   document: Document
@@ -415,106 +436,15 @@ function removeReferenceSectionsFromDocument(
 }
 
 /**
- * Fetch and validate one research candidate.
- */
-async function fetchCandidate(
-  result: SearXNGResult,
-  timeout: number,
-  query: string,
-  searchCount: number,
-  waitCaptcha: number,
-  fetchFullPage: boolean,
-  budgetScaler: number,
-): Promise<
-  | {
-      usable: true;
-      title: string;
-      url: string;
-      domain: string;
-      engine: string;
-      score?: number;
-      content: string;
-    }
-  | {
-      usable: false;
-      reason: string;
-    }
-> {
-  let domain: string;
-
-  try {
-    domain = new URL(result.url).hostname;
-  } catch {
-    return {
-      usable: false,
-      reason: "invalid URL",
-    };
-  }
-
-  try {
-    const eligibility = await checkEligibility(
-      result,
-      timeout,
-      query,
-      waitCaptcha,
-    );
-
-    if (!eligibility.eligible) {
-      return {
-        usable: false,
-        reason: eligibility.reason,
-      };
-    }
-
-    let content = eligibility.content;
-
-    const totalBudget = await getTotalBudget(searchCount, budgetScaler);
-
-    // Budget returned content.
-    const availableLimit = Math.ceil(totalBudget / searchCount);
-
-    content = selectRelevantContent(
-      content,
-      query,
-      availableLimit,
-      fetchFullPage
-    );
-
-    return {
-      usable: true,
-      title: result.title,
-      url: result.url,
-      domain,
-      engine: result.engine,
-      score: result.score,
-      content,
-    };
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      return {
-        usable: false,
-        reason: `request timed out after ${timeout}ms`,
-      };
-    }
-
-    return {
-      usable: false,
-      reason:
-        error instanceof Error
-          ? error.message
-          : String(error),
-    };
-  }
-}
-
-/**
- * Checks if the candidate is accessible
+ * Checks if the candidate is accessible 
+ * if they are return their content after good connection
+ * -> Out: object
  */
 async function checkEligibility(
   result: SearXNGResult,
   timeout: number,
   query: string,
-  waitCaptcha: number,
+  waitCaptcha: number
 ): Promise<
   | {
       eligible: true;
@@ -638,13 +568,14 @@ async function checkEligibility(
 
 /**
  * Select the most relevant paragraphs within a length budget.
+ * -> Out: string
  */
-function selectRelevantContent(
+async function selectRelevantContent(
   content: string,
   query: string,
   maxLength: number,
-  fetchFullPage: boolean,
-): string {
+  fetchFullPage: boolean
+): Promise<string> {
   
   // If the content is less than the budget, or user wants the full page fetched no need to filter send it completely through
   if (content.length <= maxLength || fetchFullPage) {
@@ -788,136 +719,111 @@ function selectRelevantContent(
 }
 
 /**
- * Fetches URL pages user directly requested through their message.
- */
-async function fetchPageContent(
-  url: string,
-  fetchFullPage: boolean,
-  budgetScaler: number,
-): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (compatible; LM-Studio-Bot/1.0)",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch ${url}: ${response.status} ${response.statusText}`
-    );
-  }
-
-  const html = await response.text();
-  let text = extractTextNoQuery(html);
-  const budgetedText = await getSmarterFilter(text, fetchFullPage, budgetScaler);
-
-  return budgetedText;
-}
-
-/**
  * Tries to intelligently filter portions to pull from fetchPageContent requests based on content size to save token size.
+ * -> Out: string
  */
-async function getSmarterFilter(text: string, fetchFullPage: boolean, budgetScaler: number){
+async function getSmarterFilter(
+  text: string, 
+  fetchFullPage: boolean, 
+  budgetScaler: number
+): Promise<string> {
+    const maxLength = 5000 * budgetScaler;
 
-  const maxLength = 5000 * budgetScaler;
+    //If user intentionally turned on Fetch Full Page, send it all back without applying budgets
+    if(fetchFullPage) {
+      return text;
+    }
 
-  //If user intentionally turned on Fetch Full Page, send it all back without applying budgets
-  if(fetchFullPage) {
-    return text;
-  }
+    //Less than 5000 characters return it all
+    if (text.length <= maxLength) {
+      return text;
+    }
 
-  //Less than 5000 characters return it all
-  if (text.length <= maxLength) {
-    return text;
-  }
+    //More than 5000 but covers less than 40% of the article's length?
+    // beginning 25% of ML, end 15% ML. Bumps maxlimit to 13,000
+    // middle distributed in three even 20% chunks that expand around the 25%, 50%, and 75% postions
+    if (maxLength/text.length <= 0.40) {
+      const bonusMaxLength = 13000 * budgetScaler;
+      const beginningSize = Math.floor(bonusMaxLength * 0.25);
+      const middleSize = Math.floor(bonusMaxLength * 0.20);
+      const endingSize = Math.floor(bonusMaxLength * 0.15);
+      
+      const textLength = text.length;
 
-  //More than 5000 but covers less than 40% of the article's length?
-  // beginning 25% of ML, end 15% ML. Bumps maxlimit to 13,000
-  // middle distributed in three even 20% chunks that expand around the 25%, 50%, and 75% postions
-  if (maxLength/text.length <= 0.40) {
-    const bonusMaxLength = 13000 * budgetScaler;
-    const beginningSize = Math.floor(bonusMaxLength * 0.25);
-    const middleSize = Math.floor(bonusMaxLength * 0.20);
-    const endingSize = Math.floor(bonusMaxLength * 0.15);
+      // Beginning: starts at 0%.
+      const beginningStart = 0;
+      const beginningEnd = beginningSize;
+
+      // Middle sections are centered on 25%, 50%, and 75%
+      // positions of the original document.
+      const firstMidCenter = Math.floor(textLength * 0.25);
+      const secondMidCenter = Math.floor(textLength * 0.50);
+      const thirdMidCenter = Math.floor(textLength * 0.75);
+      const middleHalfSize = Math.floor(middleSize / 2);
+
+      const firstMidStart = firstMidCenter - middleHalfSize;
+      const firstMidEnd = firstMidCenter + middleHalfSize;
     
-    const textLength = text.length;
+      const secondMidStart = secondMidCenter - middleHalfSize;
+      const secondMidEnd = secondMidCenter + middleHalfSize;
 
-    // Beginning: starts at 0%.
-    const beginningStart = 0;
-    const beginningEnd = beginningSize;
+      const thirdMidStart = thirdMidCenter - middleHalfSize;
+      const thirdMidEnd = thirdMidCenter + middleHalfSize;
 
-    // Middle sections are centered on 25%, 50%, and 75%
-    // positions of the original document.
-    const firstMidCenter = Math.floor(textLength * 0.25);
-    const secondMidCenter = Math.floor(textLength * 0.50);
-    const thirdMidCenter = Math.floor(textLength * 0.75);
-    const middleHalfSize = Math.floor(middleSize / 2);
+      // Ending: ends at 100%.
+      const endingStart = textLength - endingSize;
+      const endingEnd = textLength;
+      
+      text =
+        // at 0% position expands outwards to beginningSize
+        text.slice(beginningStart, beginningEnd) + 
+        `[...omitted: ${Math.max(0, firstMidStart - beginningEnd)} characters between sections...]` +
+        // expands 10% around the 25% position of the document
+        text.slice(firstMidStart, firstMidEnd) +
+        `[...omitted: ${Math.max(0, secondMidStart - firstMidEnd)} characters between sections...]` +
+        // expands 10% around the 50% position of the document
+        text.slice(secondMidStart, secondMidEnd) +
+        `[...omitted: ${Math.max(0, thirdMidStart - secondMidEnd)} characters between sections...]` +
+        // expands 10% around the 75% position of the document
+        text.slice(thirdMidStart, thirdMidEnd) +
+        `[...omitted: ${Math.max(0, endingStart - thirdMidEnd)} characters between sections...]` +
+        // at 100% position expands backwards to endingSize
+        text.slice(endingStart, endingEnd) +
+        `[received: ${bonusMaxLength > textLength? textLength : bonusMaxLength} of ${textLength} chars]`;
+      return text;
+    }
 
-    const firstMidStart = firstMidCenter - middleHalfSize;
-    const firstMidEnd = firstMidCenter + middleHalfSize;
-   
-    const secondMidStart = secondMidCenter - middleHalfSize;
-    const secondMidEnd = secondMidCenter + middleHalfSize;
+    //More than 5000 but covers more than 40%, but less than 70% of the article's length? return beginning 25% of ML, middle 65% ML, end 10% ML. Bumps maxlimit to 7,000
+    if (maxLength/text.length > 0.40 && maxLength/text.length <= 0.70) {
+      const bonusMaxLength = 8000 * budgetScaler;
+      const beginningSize = Math.floor(bonusMaxLength * 0.25);
+      const middleSize = Math.floor(bonusMaxLength * 0.65);
+      const endingSize = Math.floor(bonusMaxLength * 0.10);
+      
+      const textLength = text.length;
 
-    const thirdMidStart = thirdMidCenter - middleHalfSize;
-    const thirdMidEnd = thirdMidCenter + middleHalfSize;
+      // Beginning: starts at 0%.
+      const beginningStart = 0;
+      const beginningEnd = beginningSize;
 
-    // Ending: ends at 100%.
-    const endingStart = textLength - endingSize;
-    const endingEnd = textLength;
-    
+      // Middle: starts at 50%
+      const midCenter = Math.floor(textLength * 0.50);
+      const middleHalfSize = Math.floor(middleSize / 2);
+      const midStart = midCenter - middleHalfSize;
+      const midEnd = midCenter + middleHalfSize;
 
-    text =
-      // at 0% position expands outwards to beginningSize
-      text.slice(beginningStart, beginningEnd) + 
-      `[...omitted: ${Math.max(0, firstMidStart - beginningEnd)} characters between sections...]` +
-      // expands 10% around the 25% position of the document
-      text.slice(firstMidStart, firstMidEnd) +
-      `[...omitted: ${Math.max(0, secondMidStart - firstMidEnd)} characters between sections...]` +
-      // expands 10% around the 50% position of the document
-      text.slice(secondMidStart, secondMidEnd) +
-      `[...omitted: ${Math.max(0, thirdMidStart - secondMidEnd)} characters between sections...]` +
-      // expands 10% around the 75% position of the document
-      text.slice(thirdMidStart, thirdMidEnd) +
-      `[...omitted: ${Math.max(0, endingStart - thirdMidEnd)} characters between sections...]` +
-      // at 100% position expands backwards to endingSize
-      text.slice(endingStart, endingEnd) +
-      `[received: ${bonusMaxLength > textLength? textLength : bonusMaxLength} of ${textLength} chars]`;
-    return text;
-  }
-
-  //More than 5000 but covers more than 40%, but less than 70% of the article's length? return beginning 25% of ML, middle 65% ML, end 10% ML. Bumps maxlimit to 7,000
-  if (maxLength/text.length > 0.40 && maxLength/text.length <= 0.70) {
-    const bonusMaxLength = 8000 * budgetScaler;
-    const beginningSize = Math.floor(bonusMaxLength * 0.25);
-    const middleSize = Math.floor(bonusMaxLength * 0.65);
-    const endingSize = Math.floor(bonusMaxLength * 0.10);
-    
-    const textLength = text.length;
-
-    // Beginning: starts at 0%.
-    const beginningStart = 0;
-    const beginningEnd = beginningSize;
-
-    // Middle: starts at 50%
-    const midCenter = Math.floor(textLength * 0.50);
-    const middleHalfSize = Math.floor(middleSize / 2);
-    const midStart = midCenter - middleHalfSize;
-    const midEnd = midCenter + middleHalfSize;
-
-    // Ending: ends at 100%.
-    const endingStart = textLength - endingSize;
-    const endingEnd = textLength;
-    
-    text =
-      text.slice(beginningStart, beginningEnd) + 
-      `[...omitted: ${Math.max(0, midStart - beginningEnd)} chars...]` +
-      text.slice(midStart, midEnd) + 
-      `[...omitted: ${Math.max(0, endingStart - midEnd)} chars...]` +
-      text.slice(endingStart, endingEnd) +
-      `[received: ${bonusMaxLength > textLength? textLength : bonusMaxLength} of ${textLength} chars]`;
-    return text;
+      // Ending: ends at 100%.
+      const endingStart = textLength - endingSize;
+      const endingEnd = textLength;
+      
+      text =
+        text.slice(beginningStart, beginningEnd) + 
+        `[...omitted: ${Math.max(0, midStart - beginningEnd)} chars...]` +
+        text.slice(midStart, midEnd) + 
+        `[...omitted: ${Math.max(0, endingStart - midEnd)} chars...]` +
+        text.slice(endingStart, endingEnd) +
+        `[received: ${bonusMaxLength > textLength? textLength : bonusMaxLength} of ${textLength} chars]`;
+      return text;
   }
 
   //More than 5000 but covers more than 60% of the article? return beginning 15% of ML, middle 60% ML, end 15% ML
@@ -954,7 +860,186 @@ async function getSmarterFilter(text: string, fetchFullPage: boolean, budgetScal
   return text;
 }
 
-async function getSnippets(candidates: SearXNGResult[]) {
+/**
+ * Grabs the searxng search results page
+ * -> Out: SearXNGResults[]
+ */
+async function fetchSearchPage(
+  searchPage: number,
+  query: string,
+  time_range: string,
+  searxngUrl: string,
+  checkCandidatesCount: number,
+  timeout: number
+): Promise<SearXNGResult[]> {
+    const searchParams = new URLSearchParams({
+      q: query,
+      format: "json",
+      pageno: String(searchPage),
+      safesearch: "0",
+    });
+
+    if (time_range) {
+      const normalizedTimeRange = time_range.toLowerCase().trim();
+
+      const validRanges = [
+        "day",
+        "week",
+        "month",
+        "year",
+      ];
+
+      if (validRanges.includes(normalizedTimeRange)) {
+        searchParams.append("time_range", normalizedTimeRange);
+      }
+    }
+
+    const searchUrl = `${searxngUrl}/search?${searchParams.toString()}`;
+
+    console.log(
+      `research_web: searching page ${searchPage} for "${query}"`
+    );
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      timeout
+    );
+
+    let searchResponse: Response;
+
+    try {
+      searchResponse = await fetch(searchUrl, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "LM-Studio-Plugin/1.0",
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!searchResponse.ok) {
+      throw new Error(
+        `SearXNG returned ${searchResponse.status}: ` +
+        `${searchResponse.statusText}`
+      );
+    }
+
+    const data = (await searchResponse.json()) as SearXNGResponse;
+
+    if (!data.results || data.results.length === 0) {
+      return [];
+    }
+
+    const slicePosition = checkCandidatesCount
+
+    return data.results.slice(0, slicePosition);
+}
+
+/**
+ * Fetch and validate one research candidate.
+ * -> Out: object
+ */
+async function fetchCandidate(
+  result: SearXNGResult,
+  timeout: number,
+  query: string,
+  searchCount: number,
+  waitCaptcha: number,
+  fetchFullPage: boolean,
+  budgetScaler: number
+): Promise<
+  | {
+      usable: true;
+      title: string;
+      url: string;
+      domain: string;
+      engine: string;
+      score?: number;
+      content: string;
+    }
+  | {
+      usable: false;
+      reason: string;
+    }
+> {
+  let domain: string;
+
+  try {
+    domain = new URL(result.url).hostname;
+  } catch {
+    return {
+      usable: false,
+      reason: "invalid URL",
+    };
+  }
+
+  try {
+    const eligibility = await checkEligibility(
+      result,
+      timeout,
+      query,
+      waitCaptcha,
+    );
+
+    if (!eligibility.eligible) {
+      return {
+        usable: false,
+        reason: eligibility.reason,
+      };
+    }
+
+    let content = eligibility.content;
+
+    const totalBudget = getTotalBudget(searchCount, budgetScaler);
+
+    // Budget returned content.
+    const availableLimit = Math.ceil(totalBudget / searchCount);
+
+    content = await selectRelevantContent(
+      content,
+      query,
+      availableLimit,
+      fetchFullPage
+    );
+
+    return {
+      usable: true,
+      title: result.title,
+      url: result.url,
+      domain,
+      engine: result.engine,
+      score: result.score,
+      content,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return {
+        usable: false,
+        reason: `request timed out after ${timeout}ms`,
+      };
+    }
+
+    return {
+      usable: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : String(error),
+    };
+  }
+}
+
+/**
+ * Fetches the snippets of the candidates
+ * -> Out: string
+ */
+async function fetchSnippets(
+  candidates: SearXNGResult[]
+): Promise<string> {
   const snippetResults = candidates
     .map(
       (candidate, index) =>
@@ -967,79 +1052,269 @@ async function getSnippets(candidates: SearXNGResult[]) {
   return snippetResults;
 }
 
-async function fetchSearchPage(
-  searchPage: number,
-  query: string,
-  time_range: string,
-  searxngUrl: string,
-  checkCandidatesCount: number,
-  timeout: number,
-): Promise<SearXNGResult[]> {
-  const searchParams = new URLSearchParams({
-    q: query,
-    format: "json",
-    pageno: String(searchPage),
-    safesearch: "0",
+/**
+ * Fetches URL pages user directly requested through their message.
+ * -> Out: string
+ */
+async function fetchPageContent(
+  url: string,
+  fetchFullPage: boolean,
+  budgetScaler: number
+): Promise<string> {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (compatible; LM-Studio-Bot/1.0)",
+    },
   });
 
-  if (time_range) {
-    const normalizedTimeRange = time_range.toLowerCase().trim();
-
-    const validRanges = [
-      "day",
-      "week",
-      "month",
-      "year",
-    ];
-
-    if (validRanges.includes(normalizedTimeRange)) {
-      searchParams.append("time_range", normalizedTimeRange);
-    }
-  }
-
-  const searchUrl = `${searxngUrl}/search?${searchParams.toString()}`;
-
-  console.log(
-    `research_web: searching page ${searchPage} for "${query}"`
-  );
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    timeout
-  );
-
-  let searchResponse: Response;
-
-  try {
-    searchResponse = await fetch(searchUrl, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "LM-Studio-Plugin/1.0",
-      },
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!searchResponse.ok) {
+  if (!response.ok) {
     throw new Error(
-      `SearXNG returned ${searchResponse.status}: ` +
-      `${searchResponse.statusText}`
+      `Failed to fetch ${url}: ${response.status} ${response.statusText}`
     );
   }
 
-  const data = (await searchResponse.json()) as SearXNGResponse;
+  const html = await response.text();
+  let text = extractTextNoQuery(html);
+  const budgetedText = await getSmarterFilter(text, fetchFullPage, budgetScaler);
 
-  if (!data.results || data.results.length === 0) {
-    return [];
-  }
+  return budgetedText;
+}
 
-  const slicePosition = checkCandidatesCount
+/**
+ * Fetches Urls in user message into context
+ * -> Out: string
+ */
+async function handleUserUrlInject(
+  urls: string[],
+  fetchFullPage: boolean,
+  budgetScaler: number
+): Promise<string> {
+    const results = await Promise.all(
+      urls.map(async (url) => {
+        try {
+          const cleanUrl = url.replace(/^["'](.*)["']$/, '$1');
+          const content = await fetchPageContent(cleanUrl, fetchFullPage, budgetScaler);
+          return `<UI_Fetch> URL:${url} Content:${content}`;
+        } catch (error) {
+          return `<UI_Fetch> URL:${url} Error fetching page:${error instanceof Error? error.message : String(error)}`;
+        }
+      })
+    );
 
-  return data.results.slice(0, slicePosition);
+    return results.join("\n\n---\n\n");
+}
+
+/**
+ * Different paths for researching with snippets
+ * Research only using snippets
+ * -> Out: string
+ */
+async function handleSnippetsOnly(
+  candidates: SearXNGResult[],
+  currentSearchPage: number,
+  query: string,
+  searxngUrl: string,
+  checkCandidatesCount: number,
+  timeout: number,
+  time_range?: string
+): Promise<string> {
+    candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
+
+    if (candidates.length === 0) {
+      return `<SO_Fetch> No search results found for "${query}".`;
+    }
+
+    return `<SO_Fetch> Using only Snippets, warn the user in response: ${await fetchSnippets(candidates)}`;
+}
+
+/**
+ * Different paths for researching with snippets
+ * Pulls first search results page, chooses best keyword matching snippet
+ * Fetches the best match for model
+ * -> Out: string
+ */
+async function handleSnippetsFirst(
+  candidates: SearXNGResult[],
+  currentSearchPage: number,
+  query: string,
+  searxngUrl: string,
+  checkCandidatesCount: number,
+  timeout: number,
+  fetchFullPage: boolean,
+  budgetScaler: number,
+  time_range?: string
+): Promise<string> {
+    candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
+
+    if (candidates.length === 0) {
+      return `<SF_Fetch> No search results found for "${query}".`;
+    }
+
+    // Check if candidate is accessible or blocked by capcha or lacking content
+    const accessibleCandidates: {
+      candidate: SearXNGResult;
+      content: string;
+    }[] = [];
+
+    for (const candidate of candidates) {
+      const eligibility = await checkEligibility(
+        candidate,
+        timeout,
+        query,
+        0 //force no waiting for captcha checking
+      );
+
+      if (eligibility.eligible) {
+        accessibleCandidates.push({
+          candidate,
+          content: eligibility.content,
+        });
+      }
+    }
+
+    if (accessibleCandidates.length === 0) {
+      return `<SF_Fetch> No accessible search results found for "${query}".`;
+    }
+
+    // Rank accessible candidates to find one that best matches query keywords
+    // assign a score, then fetch best candidate
+    const scoredCandidates = accessibleCandidates.map((item) => {
+      const normalize = (text: string): string[] =>
+        text
+          .toLowerCase()
+          .replace(/[’']/g, "")
+          .split(/\s+/)
+          .map((word) => word.replace(/[^\w]/g, ""))
+          .filter(Boolean);
+
+      const titleText = (item.candidate.title ?? "").toLowerCase();
+      const snippetText = (item.candidate.snippet ?? "").toLowerCase();
+      const urlText = (item.candidate.url ?? "").toLowerCase();
+
+      let hostname = "";
+
+      try {
+        hostname = new URL(item.candidate.url).hostname
+          .toLowerCase()
+          .replace(/^www\./, "");
+      } catch {
+        // URL was already checked by checkEligibility().
+      }
+
+      const titleWords = new Set(normalize(titleText));
+      const snippetWords = new Set(normalize(snippetText));
+      const urlWords = new Set(normalize(urlText.replace(/[\/\-_.?=&]/g, " ")));
+
+      const queryWords = normalize(query);
+
+      let score = 0;
+
+      // 1. Individual word matches
+      for (const word of queryWords) {
+        // Title is the strongest signal.
+        if (titleWords.has(word)) {
+          score += 4;
+        }
+
+        // Snippet is useful, but weaker.
+        if (snippetWords.has(word)) {
+          score += 1;
+        }
+
+        // URL path is useful for topical terms.
+        if (urlWords.has(word)) {
+          score += 2;
+        }
+      }
+
+      // 2. Consecutive phrase matches
+      for (let i = 0; i < queryWords.length - 1; i++) {
+        const phrase = `${queryWords[i]} ${queryWords[i + 1]}`;
+
+        if (titleText.includes(phrase)) {
+          score += 8;
+        }
+
+        if (snippetText.includes(phrase)) {
+          score += 3;
+        }
+
+        if (urlText.includes(phrase)) {
+          score += 4;
+        }
+      }
+
+      // 3. Exact query phrase
+      const normalizedQuery = query
+        .toLowerCase()
+        .replace(/[’']/g, "")
+        .replace(/[^\w\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (normalizedQuery) {
+        if (titleText.includes(normalizedQuery)) {
+          score += 15;
+        }
+
+        if (snippetText.includes(normalizedQuery)) {
+          score += 5;
+        }
+      }
+
+
+      // 4. Domain/source matching
+      // Normalize both so "tom's hardware" becomes "tomshardware".
+      const normalizedHostname = hostname
+        .replace(/[^a-z0-9]/g, "");
+
+      const normalizedQueryForDomain = query
+        .toLowerCase()
+        .replace(/[’']/g, "")
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      const domainTokens = normalizedQueryForDomain.split(" ");
+
+      // Check progressively larger groups of query words against
+      // the hostname. This allows "tom's hardware" to match
+      // "tomshardware.com" without requiring the entire query to
+      // be the domain name.
+      for (let start = 0; start < domainTokens.length; start++) {
+        for (
+          let end = start + 2;
+          end <= domainTokens.length;
+          end++
+        ) {
+          const phrase = domainTokens
+            .slice(start, end)
+            .join("");
+
+          if (phrase.length >= 5 && normalizedHostname.includes(phrase)) {
+            const wordCount = end - start;
+
+            // Source/domain match is strong, but not strong enough
+            // to override a much better topical match.
+            score += 6 * wordCount;
+          }
+        }
+      }
+
+      return {
+        candidate: item.candidate,
+        content: item.content,
+        score,
+      };
+    });
+
+    scoredCandidates.sort((a, b) => b.score - a.score);
+
+    const bestCandidate = scoredCandidates[0];
+    const budgetedText = await getSmarterFilter(bestCandidate.content, fetchFullPage, budgetScaler);
+
+    return `<SF_Fetch> Title:${bestCandidate.candidate.title} URL:${bestCandidate.candidate.url} Content:${budgetedText}`;
 }
 
 /**
@@ -1062,12 +1337,11 @@ export async function toolsProvider(
     name: "research_web",
     description:
       "If user mentions something unfamiliar, it may be beyond your knowledge cutoff;" +
-      "check research_web before dismissing or correcting their claim."+
-      "Evaluate most recent research_web results before making another research_web call." +
-      "If user includes urls in their message put into 'urls' array." +
-      "If user does not include URL but query is URL, attempt to fetch URL's webpage." +
-      "After two consecutive failures to fetch information, stop, inform user." +
-      "It is non-optional, you must cite sources at the end of your response, formatted as [DOMAIN](URL)." +
+      "use research_web for relevant information before dismissing or correcting their claim."+
+      "No extra research_web tool calls until the previous research_web results are evaluated." +
+      "If user message includes urls put urls into the 'urls' array." +
+      "After two consecutive failures to fetch or no results found, stop and inform user." +
+      "It's non-optional, cite sources at the end of your response, formatted as [DOMAIN](URL)." +
       "Distinct stories should remain separated.",
     parameters: {
       query: z
@@ -1101,9 +1375,8 @@ export async function toolsProvider(
 
       try {
         // ----------------------------------------------------------
-        // States that persists across search pages.
+        // States that persists across search pages
         // ----------------------------------------------------------
-
         const accepted: AcceptedSource[] = [];
         const rejected: RejectedSource[] = [];
         const acceptedDomains = new Set<string>();
@@ -1115,245 +1388,60 @@ export async function toolsProvider(
         let totalCandidatesChecked = 0;
 
         // ----------------------------------------------------------
+        // User sent direct URL links in their message
+        // Retrieve them as sources for context
+        // ----------------------------------------------------------
+        if (urls && urls.length > 0){
+          return await handleUserUrlInject(
+            urls,
+            fetchFullPage,
+            budgetScaler
+          );
+        }
+
+        // ----------------------------------------------------------
         // User wants snippets only
         // ----------------------------------------------------------
         if (snippetsModeSelect === "snippets_only"){
-          candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
-
-          if (candidates.length === 0) {
-            return `No search results found for "${query}".`;
-          }
-
-          return "Using Snippets, warn the user in response:" + await getSnippets(candidates);
+          return await handleSnippetsOnly(
+            candidates,
+            currentSearchPage,
+            query,
+            searxngUrl,
+            checkCandidatesCount,
+            timeout,
+            time_range
+          );
         }
 
         // ----------------------------------------------------------
         // User wants snippets first
         // ----------------------------------------------------------
-        if (snippetsModeSelect === "snippets_first") {
-          candidates = await fetchSearchPage(
+        if (snippetsModeSelect === "snippets_first"){
+          return await handleSnippetsFirst(
+            candidates,
             currentSearchPage,
             query,
-            time_range ?? "",
             searxngUrl,
             checkCandidatesCount,
-            timeout
+            timeout,
+            fetchFullPage,
+            budgetScaler,
+            time_range
           );
-
-          if (candidates.length === 0) {
-            return `No search results found for "${query}".`;
-          }
-
-          const accessibleCandidates: {
-            candidate: SearXNGResult;
-            content: string;
-          }[] = [];
-
-          for (const candidate of candidates) {
-            const eligibility = await checkEligibility(
-              candidate,
-              timeout,
-              query,
-              0
-            );
-
-            if (eligibility.eligible) {
-              accessibleCandidates.push({
-                candidate,
-                content: eligibility.content,
-              });
-            }
-          }
-
-          if (accessibleCandidates.length === 0) {
-            return `No accessible search results found for "${query}".`;
-          }
-
-          const scoredCandidates = accessibleCandidates.map((item) => {
-            const normalize = (text: string): string[] =>
-              text
-                .toLowerCase()
-                .replace(/[’']/g, "")
-                .split(/\s+/)
-                .map((word) => word.replace(/[^\w]/g, ""))
-                .filter(Boolean);
-
-            const titleText = (item.candidate.title ?? "").toLowerCase();
-            const snippetText = (item.candidate.snippet ?? "").toLowerCase();
-            const urlText = (item.candidate.url ?? "").toLowerCase();
-
-            let hostname = "";
-
-            try {
-              hostname = new URL(item.candidate.url).hostname
-                .toLowerCase()
-                .replace(/^www\./, "");
-            } catch {
-              // URL was already checked by checkEligibility().
-            }
-
-            const titleWords = new Set(normalize(titleText));
-            const snippetWords = new Set(normalize(snippetText));
-            const urlWords = new Set(normalize(urlText.replace(/[\/\-_.?=&]/g, " ")));
-
-            const queryWords = normalize(query);
-
-            let score = 0;
-
-            // ------------------------------------------------------------
-            // 1. Individual word matches
-            // ------------------------------------------------------------
-
-            for (const word of queryWords) {
-              // Title is the strongest signal.
-              if (titleWords.has(word)) {
-                score += 4;
-              }
-
-              // Snippet is useful, but weaker.
-              if (snippetWords.has(word)) {
-                score += 1;
-              }
-
-              // URL path is useful for topical terms.
-              if (urlWords.has(word)) {
-                score += 2;
-              }
-            }
-
-            // ------------------------------------------------------------
-            // 2. Consecutive phrase matches
-            // ------------------------------------------------------------
-
-            for (let i = 0; i < queryWords.length - 1; i++) {
-              const phrase = `${queryWords[i]} ${queryWords[i + 1]}`;
-
-              if (titleText.includes(phrase)) {
-                score += 8;
-              }
-
-              if (snippetText.includes(phrase)) {
-                score += 3;
-              }
-
-              if (urlText.includes(phrase)) {
-                score += 4;
-              }
-            }
-
-            // ------------------------------------------------------------
-            // 3. Exact query phrase
-            // ------------------------------------------------------------
-
-            const normalizedQuery = query
-              .toLowerCase()
-              .replace(/[’']/g, "")
-              .replace(/[^\w\s]/g, " ")
-              .replace(/\s+/g, " ")
-              .trim();
-
-            if (normalizedQuery) {
-              if (titleText.includes(normalizedQuery)) {
-                score += 15;
-              }
-
-              if (snippetText.includes(normalizedQuery)) {
-                score += 5;
-              }
-            }
-
-            // ------------------------------------------------------------
-            // 4. Domain/source matching
-            //
-            // Example:
-            //   Query: "tom's hardware rtx 5050"
-            //   Host:  "tomshardware.com"
-            //
-            // Normalize both so "tom's hardware" becomes "tomshardware".
-            // ------------------------------------------------------------
-
-            const normalizedHostname = hostname
-              .replace(/[^a-z0-9]/g, "");
-
-            const normalizedQueryForDomain = query
-              .toLowerCase()
-              .replace(/[’']/g, "")
-              .replace(/[^a-z0-9\s]/g, " ")
-              .replace(/\s+/g, " ")
-              .trim();
-
-            const domainTokens = normalizedQueryForDomain.split(" ");
-
-            // Check progressively larger groups of query words against
-            // the hostname. This allows "tom's hardware" to match
-            // "tomshardware.com" without requiring the entire query to
-            // be the domain name.
-            for (let start = 0; start < domainTokens.length; start++) {
-              for (
-                let end = start + 2;
-                end <= domainTokens.length;
-                end++
-              ) {
-                const phrase = domainTokens
-                  .slice(start, end)
-                  .join("");
-
-                if (phrase.length >= 5 && normalizedHostname.includes(phrase)) {
-                  const wordCount = end - start;
-
-                  // Source/domain match is strong, but not strong enough
-                  // to override a much better topical match.
-                  score += 6 * wordCount;
-                }
-              }
-            }
-
-            return {
-              candidate: item.candidate,
-              content: item.content,
-              score,
-            };
-          });
-
-          scoredCandidates.sort((a, b) => b.score - a.score);
-
-          const bestCandidate = scoredCandidates[0];
-          
-          const budgetedText = await getSmarterFilter(bestCandidate.content, fetchFullPage, budgetScaler);
-
-          return `Title: ${bestCandidate.candidate.title}\n\n` + `URL: ${bestCandidate.candidate.url}\n\n` + budgetedText;
         }
 
         // ----------------------------------------------------------
-        // User sent direct URL links in their message.
-        // Retrieve them as sources for context.
+        // [Start] Normal research_web Route - Get the first page
         // ----------------------------------------------------------
-
-        if (urls && urls.length > 0){
-          console.log("============================retrieving direct URL")
-          const results = await Promise.all(
-            urls.map(async (url) => {
-              try {
-                const cleanUrl = url.replace(/^["'](.*)["']$/, '$1');
-                const content = await fetchPageContent(cleanUrl, fetchFullPage, budgetScaler);
-                return `URL: ${url}\n\n${content}`;
-              } catch (error) {
-                return `URL: ${url}\n\nError fetching page: ${
-                  error instanceof Error
-                    ? error.message
-                    : String(error)
-                }`;
-              }
-            })
-          );
-
-          return results.join("\n\n---\n\n");
-        }
-
-        // ----------------------------------------------------------
-        // STEP 2: Get the first page.
-        // ----------------------------------------------------------
-        candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout)
+        candidates = await fetchSearchPage(
+          currentSearchPage, 
+          query, 
+          time_range ?? "", 
+          searxngUrl, 
+          checkCandidatesCount, 
+          timeout
+        );
 
         if (candidates.length === 0) {
           return `No search results found for "${query}".`;
@@ -1366,17 +1454,12 @@ export async function toolsProvider(
         );
 
         // ----------------------------------------------------------
-        // STEP 3: Check candidates sequentially.
+        // Check candidates sequentially
         //
         // If we exhaust the current page before reaching
-        // sources, fetch the next page and continue.
+        // requested sources, fetch the next page and continue
         // ----------------------------------------------------------
-
         while (accepted.length < sources) {
-          // --------------------------------------------------------
-          // If we've exhausted the current page, get the next page.
-          // --------------------------------------------------------
-
           if (candidateIndex >= candidates.length) {
             const nextPage = currentSearchPage + 1;
 
@@ -1411,9 +1494,8 @@ export async function toolsProvider(
           }
 
           // --------------------------------------------------------
-          // Process next candidate.
+          // Process next candidate
           // --------------------------------------------------------
-
           const candidate = candidates[candidateIndex];
           candidateIndex++;
           totalCandidatesChecked++;
@@ -1465,13 +1547,13 @@ export async function toolsProvider(
             rejected.push({
               title: candidate.title,
               url: candidate.url,
-              reason: result.reason,
+              reason: result.reason
             });
             continue;
           }
 
           // --------------------------------------------------------
-          // ACCEPTED SOURCE.
+          // ACCEPTED SOURCE
           // --------------------------------------------------------
 
           acceptedDomains.add(domain);
@@ -1483,7 +1565,7 @@ export async function toolsProvider(
             engine: result.engine,
             score: result.score,
             contentSource: "FETCHED_PAGE",
-            content: result.content,
+            content: result.content
           });
 
           console.log(
@@ -1493,35 +1575,28 @@ export async function toolsProvider(
         }
 
         // ----------------------------------------------------------
-        // STEP 4: Update the externally tracked page.
-        //
-        // This leaves currentPage pointing to the next page that
-        // would be searched if the user asks to continue.
+        // Update the externally tracked page
         // ----------------------------------------------------------
 
         currentNextPage = currentSearchPage + 1;
         
         // ----------------------------------------------------------
-        // STEP 5: Return research package.
+        // Return research package
         // ----------------------------------------------------------
 
         if (accepted.length === 0) {
-          const snippetResults = getSnippets(candidates)
+          const snippetResults = await fetchSnippets(candidates);
 
           return (
-            `No accessible pages. Search snippets:` +
-            snippetResults
+            `No accessible pages. Search snippets: ${snippetResults}`
           );
         }
 
-        let output = `Query: ${query}`;
+        let output = `<NML_FETCH> Query: ${query}`;
 
         accepted.forEach((source, index) => {
           output +=
-            `SOURCE ${index + 1}\n` +
-            `Title: ${source.title}\n` +
-            `URL: ${source.url}\n` +
-            `${source.content}\n`;
+            ` SOURCE[${index + 1}] Title:${source.title} URL:${source.url} Content:${source.content}\n`;
         });
 
         if (accepted.length < sources) {
