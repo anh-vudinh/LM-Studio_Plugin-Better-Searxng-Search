@@ -13,6 +13,7 @@ interface SearXNGResult {
   content: string;
   engine: string;
   score?: number;
+  snippet?: string;
 }
 
 interface SearXNGResponse {
@@ -450,72 +451,22 @@ async function fetchCandidate(
     };
   }
 
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
   try {
-    const controller = new AbortController();
-
-    timeoutId = setTimeout(
-      () => controller.abort(),
-      timeout
+    const eligibility = await checkEligibility(
+      result,
+      timeout,
+      query,
+      waitCaptcha,
     );
 
-    const response = await fetch(result.url, {
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-          "AppleWebKit/537.36 (KHTML, like Gecko) " +
-          "Chrome/131.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml," +
-          "application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
-      },
-      signal: controller.signal,
-    });
-
-    if (response.status === 401) return { usable: false, reason: "HTTP 401 Unauthorized" };
-    if (response.status === 403) return { usable: false, reason: "HTTP 403 Forbidden — page inaccessible" };
-    if (response.status === 429) return { usable: false, reason: "HTTP 429 Too Many Requests — rate limited" };
-    if (response.status >= 500) {
+    if (!eligibility.eligible) {
       return {
         usable: false,
-        reason: `HTTP ${response.status} ${response.statusText} — server error`,
-      };
-    }
-    if (!response.ok) {
-      return { usable: false, reason: `HTTP ${response.status} ${response.statusText}` };
-    }
-
-    // Give transient challenge pages time before inspecting.
-    await sleep(waitCaptcha);
-
-    const html = await response.text();
-
-    const inspectionText = html.substring(0, 100000);
-
-    const challenge = detectActiveChallenge(inspectionText);
-
-    if (challenge) {
-      return {
-        usable: false,
-        reason: `active verification challenge detected: ${challenge}`,
+        reason: eligibility.reason,
       };
     }
 
-    let content = extractText(html, query);
-
-    const wordCount = content
-      .split(/\s+/)
-      .filter(Boolean)
-      .length;
-
-    if (wordCount < 150) {
-      return {
-        usable: false,
-        reason: `insufficient readable page content (${wordCount} words.`,
-      };
-    }
+    let content = eligibility.content;
 
     const totalBudget = await getTotalBudget(searchCount, budgetScaler);
 
@@ -553,10 +504,135 @@ async function fetchCandidate(
           ? error.message
           : String(error),
     };
-  } finally {
-    if (timeoutId !== undefined) {
-      clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Checks if the candidate is accessible
+ */
+async function checkEligibility(
+  result: SearXNGResult,
+  timeout: number,
+  query: string,
+  waitCaptcha: number,
+): Promise<
+  | {
+      eligible: true;
+      content: string;
     }
+  | {
+      eligible: false;
+      reason: string;
+    }
+> {
+  const controller = new AbortController();
+
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    timeout
+  );
+
+  try {
+    const response = await fetch(result.url, {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+          "AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/131.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml," +
+          "application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+      },
+      signal: controller.signal,
+    });
+
+    if (response.status === 401) {
+      return {
+        eligible: false,
+        reason: "HTTP 401 Unauthorized",
+      };
+    }
+
+    if (response.status === 403) {
+      return {
+        eligible: false,
+        reason: "HTTP 403 Forbidden — page inaccessible",
+      };
+    }
+
+    if (response.status === 429) {
+      return {
+        eligible: false,
+        reason: "HTTP 429 Too Many Requests — rate limited",
+      };
+    }
+
+    if (response.status >= 500) {
+      return {
+        eligible: false,
+        reason: `HTTP ${response.status} ${response.statusText} — server error`,
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        eligible: false,
+        reason: `HTTP ${response.status} ${response.statusText}`,
+      };
+    }
+
+    // Give transient challenge pages time before inspecting.
+    await sleep(waitCaptcha);
+
+    const html = await response.text();
+
+    const inspectionText = html.substring(0, 100000);
+
+    const challenge = detectActiveChallenge(inspectionText);
+
+    if (challenge) {
+      return {
+        eligible: false,
+        reason: `active verification challenge detected: ${challenge}`,
+      };
+    }
+
+    const content = extractText(html, query);
+
+    const wordCount = content
+      .split(/\s+/)
+      .filter(Boolean)
+      .length;
+
+    if (wordCount < 150) {
+      return {
+        eligible: false,
+        reason: `insufficient readable page content (${wordCount} words.`,
+      };
+    }
+
+    return {
+      eligible: true,
+      content,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return {
+        eligible: false,
+        reason: `request timed out after ${timeout}ms`,
+      };
+    }
+
+    return {
+      eligible: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : String(error),
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -987,10 +1063,10 @@ export async function toolsProvider(
     description:
       "If user mentions something unfamiliar, it may be beyond your knowledge cutoff;" +
       "check research_web before dismissing or correcting their claim."+
-      "Always evaluate research_web results before making another research_web call." +
+      "Evaluate most recent research_web results before making another research_web call." +
       "If user includes urls in their message put into 'urls' array." +
       "If user does not include URL but query is URL, attempt to fetch URL's webpage." +
-      "After two consecutive research failures, stop, inform user." +
+      "After two consecutive failures to fetch information, stop, inform user." +
       "It is non-optional, you must cite sources at the end of your response, formatted as [DOMAIN](URL)." +
       "Distinct stories should remain separated.",
     parameters: {
@@ -1039,10 +1115,10 @@ export async function toolsProvider(
         let totalCandidatesChecked = 0;
 
         // ----------------------------------------------------------
-        // User only wants snippets
+        // User wants snippets only
         // ----------------------------------------------------------
         if (snippetsModeSelect === "snippets_only"){
-          candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout)
+          candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
 
           if (candidates.length === 0) {
             return `No search results found for "${query}".`;
@@ -1052,11 +1128,209 @@ export async function toolsProvider(
         }
 
         // ----------------------------------------------------------
+        // User wants snippets first
+        // ----------------------------------------------------------
+        if (snippetsModeSelect === "snippets_first") {
+          candidates = await fetchSearchPage(
+            currentSearchPage,
+            query,
+            time_range ?? "",
+            searxngUrl,
+            checkCandidatesCount,
+            timeout
+          );
+
+          if (candidates.length === 0) {
+            return `No search results found for "${query}".`;
+          }
+
+          const accessibleCandidates: {
+            candidate: SearXNGResult;
+            content: string;
+          }[] = [];
+
+          for (const candidate of candidates) {
+            const eligibility = await checkEligibility(
+              candidate,
+              timeout,
+              query,
+              0
+            );
+
+            if (eligibility.eligible) {
+              accessibleCandidates.push({
+                candidate,
+                content: eligibility.content,
+              });
+            }
+          }
+
+          if (accessibleCandidates.length === 0) {
+            return `No accessible search results found for "${query}".`;
+          }
+
+          const scoredCandidates = accessibleCandidates.map((item) => {
+            const normalize = (text: string): string[] =>
+              text
+                .toLowerCase()
+                .replace(/[’']/g, "")
+                .split(/\s+/)
+                .map((word) => word.replace(/[^\w]/g, ""))
+                .filter(Boolean);
+
+            const titleText = (item.candidate.title ?? "").toLowerCase();
+            const snippetText = (item.candidate.snippet ?? "").toLowerCase();
+            const urlText = (item.candidate.url ?? "").toLowerCase();
+
+            let hostname = "";
+
+            try {
+              hostname = new URL(item.candidate.url).hostname
+                .toLowerCase()
+                .replace(/^www\./, "");
+            } catch {
+              // URL was already checked by checkEligibility().
+            }
+
+            const titleWords = new Set(normalize(titleText));
+            const snippetWords = new Set(normalize(snippetText));
+            const urlWords = new Set(normalize(urlText.replace(/[\/\-_.?=&]/g, " ")));
+
+            const queryWords = normalize(query);
+
+            let score = 0;
+
+            // ------------------------------------------------------------
+            // 1. Individual word matches
+            // ------------------------------------------------------------
+
+            for (const word of queryWords) {
+              // Title is the strongest signal.
+              if (titleWords.has(word)) {
+                score += 4;
+              }
+
+              // Snippet is useful, but weaker.
+              if (snippetWords.has(word)) {
+                score += 1;
+              }
+
+              // URL path is useful for topical terms.
+              if (urlWords.has(word)) {
+                score += 2;
+              }
+            }
+
+            // ------------------------------------------------------------
+            // 2. Consecutive phrase matches
+            // ------------------------------------------------------------
+
+            for (let i = 0; i < queryWords.length - 1; i++) {
+              const phrase = `${queryWords[i]} ${queryWords[i + 1]}`;
+
+              if (titleText.includes(phrase)) {
+                score += 8;
+              }
+
+              if (snippetText.includes(phrase)) {
+                score += 3;
+              }
+
+              if (urlText.includes(phrase)) {
+                score += 4;
+              }
+            }
+
+            // ------------------------------------------------------------
+            // 3. Exact query phrase
+            // ------------------------------------------------------------
+
+            const normalizedQuery = query
+              .toLowerCase()
+              .replace(/[’']/g, "")
+              .replace(/[^\w\s]/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+
+            if (normalizedQuery) {
+              if (titleText.includes(normalizedQuery)) {
+                score += 15;
+              }
+
+              if (snippetText.includes(normalizedQuery)) {
+                score += 5;
+              }
+            }
+
+            // ------------------------------------------------------------
+            // 4. Domain/source matching
+            //
+            // Example:
+            //   Query: "tom's hardware rtx 5050"
+            //   Host:  "tomshardware.com"
+            //
+            // Normalize both so "tom's hardware" becomes "tomshardware".
+            // ------------------------------------------------------------
+
+            const normalizedHostname = hostname
+              .replace(/[^a-z0-9]/g, "");
+
+            const normalizedQueryForDomain = query
+              .toLowerCase()
+              .replace(/[’']/g, "")
+              .replace(/[^a-z0-9\s]/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+
+            const domainTokens = normalizedQueryForDomain.split(" ");
+
+            // Check progressively larger groups of query words against
+            // the hostname. This allows "tom's hardware" to match
+            // "tomshardware.com" without requiring the entire query to
+            // be the domain name.
+            for (let start = 0; start < domainTokens.length; start++) {
+              for (
+                let end = start + 2;
+                end <= domainTokens.length;
+                end++
+              ) {
+                const phrase = domainTokens
+                  .slice(start, end)
+                  .join("");
+
+                if (phrase.length >= 5 && normalizedHostname.includes(phrase)) {
+                  const wordCount = end - start;
+
+                  // Source/domain match is strong, but not strong enough
+                  // to override a much better topical match.
+                  score += 6 * wordCount;
+                }
+              }
+            }
+
+            return {
+              candidate: item.candidate,
+              content: item.content,
+              score,
+            };
+          });
+
+          scoredCandidates.sort((a, b) => b.score - a.score);
+
+          const bestCandidate = scoredCandidates[0];
+          
+          const budgetedText = await getSmarterFilter(bestCandidate.content, fetchFullPage, budgetScaler);
+
+          return `Title: ${bestCandidate.candidate.title}\n\n` + `URL: ${bestCandidate.candidate.url}\n\n` + budgetedText;
+        }
+
+        // ----------------------------------------------------------
         // User sent direct URL links in their message.
         // Retrieve them as sources for context.
         // ----------------------------------------------------------
 
         if (urls && urls.length > 0){
+          console.log("============================retrieving direct URL")
           const results = await Promise.all(
             urls.map(async (url) => {
               try {

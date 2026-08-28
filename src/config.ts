@@ -84,11 +84,11 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Snippets Mode",
       subtitle:
-        "*Recommended* Snippets Fallback",
+        "*Recommended* Fallback or First",
         options: [
-          { value: "snippets_fallback", displayName: "Snippets Fallback" },
-          { value: "snippets_first", displayName: "Snippets First" },
-          { value: "snippets_only", displayName: "Snippets Only" },
+          { value: "snippets_fallback", displayName: "Fallback (Best)" },
+          { value: "snippets_first", displayName: "First (Good)" },
+          { value: "snippets_only", displayName: "Snippets (Worst)" },
         ],
     },
     "snippets_fallback"
