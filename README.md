@@ -1,183 +1,206 @@
-## Background (8/24/2026)
-Got into local AI and found that LM Studio lacked a built in search feature. Found out about Searxng and [rzk's plugin](https://lmstudio.ai/rzk/Searxng-search).
-It satiated me for a couple hours then I wanted more from it and for it to do things better. Things like primarily relying on snippets, making too many repeated tool calls, 
-over spending tokens for substance lacking snippets, and not enough meaningful control over the search. So I rewrote it.
-Nevertheless, thank you rzk for the framework.
+# better-searxng-search (8/28/2026)
+
+A web search plugin for **LM Studio** that searches the web through a **local [SearXNG](https://github.com/Searxng/Searxng)** instance, filters out junk, and returns only the parts of pages your model actually needs.
+
+The whole point of this plugin is **token efficiency**. A naive "search → dump the page" tool wastes context tokens. This plugin:
+
+- picks **which** sources to keep (accessible, on‑topic, no duplicate domains),
+- decides **how much** of each page to keep (two budgeting systems), and
+- **scrubs** boilerplate before anything reaches the model.
+
+> This is a rework of [rzk's Searxng plugin](https://lmstudio.ai/rzk/Searxng-search) but with better logic and customization. Thanks rzk.
+
+---
+
+## What it does (the short version)
+
+With the tool enabled, you ask the model a question. It calls `research_web`. The plugin then:
+
+1. Asks SearXNG for search results (up to 25 per page).
+2. Increments through the results one by one, **rejecting** pages that are CAPTCHA‑gated, empty, or that fail to render into readable text.
+3. Until it finds your preset number of **good** sources (default 3).
+4. For each kept source, it cuts the page down to the paragraphs most relevant to your query, within a preset character budget.
+5. Finally gives the model the cleaned article's contents.
+
+You can also **paste URLs** into your message. The plugin fetches those directly (up to 4 URLs) and brings their content into context.
+
+---
+
+## The two budgeting systems
+
+The plugin caps how much text each source contributes, so context stays small. There are two cap strategies, used in different situations:
+
+### 1. Simple Budget — normal multi‑source research
+
+When the model does a regular search, NML_FETCH, it searches to try and match your requested # Sources, each source accepted is trimmed to a **keyword‑relevant** slice: the plugin finds the paragraphs that matches your query words (plus one paragraph of context around them) and returns as many that fit within the budget.
+
+Total character budget scales based on how many requested sources you set:
+
+| Sources requested | Total chars returned | ≈ per source |
+|:-----------------:|:--------------------:|:------------:|
+| 1                 | 2,000                | 2,000        |
+| 2                 | 3,000                | 1,500        |
+| 3                 | 4,000                | ~1,333       |
+| 4                 | 4,800                | ~1,200       |
+| 5 – 7             | 6,300                | ~900 – 1,260 |
+| 8 – 10            | 8,000                | ~800 – 1,000 |
+
+*Default is 3 sources* Preset budget values can be multiplied by your **Scale Default Budgets** factor as low as x0.1 to x2.0 (default ×1.0).
+
+### 2. Wide‑Net Budget — fetching a single whole page
+
+When the content is **one** page (you pasted a URL, or the model is fetching a specific topic like a Wikipedia article), keyword‑trimming isn't the right tool — you want a *representative sample* of the whole document. The plugin samples by **position**: a slice from the beginning, the middle, and the end.
+
+The sampling pattern depends on how big the page is relative to the base budget (5,000 chars × your scale factor):
+Larger pages will start with a higher base budget.
+
+| Page size vs. budget    | Chars sampled | Allocation |
+|:----------------------: |:-------------:|:----------:|
+| ≤ 40% (large page)      | 13,000        | 25% start · 20% each around 25% / 50% / 75% · 15% end |
+| 40% – 70% (medium)      | 8,000         | 25% start · 65% middle · 10% end |
+| > 70% (small page)      | 5,000         | 25% start · 55% middle · 20% end |
+
+From personal experiments the models claim they have **~80% of the relevant information** of the full page for a fraction of the tokens, or have no difficulties answering the questions unless you asked for finer details on omitted sections. The model knows the content is there based off surround context, it just cann't give details it didn't see.
+If the model asks you if you want to pull the omitted parts, decline it's offer (unless you first toggled on **Fetch Entire Webpages** or extend the **Budget Multiplier**) it will not be able to get those omitted parts.
+
+### I don't want any budgeting
+
+Turn on **Fetch Entire Webpages**. This bypasses both budget systems and returns the cleaned full page. It works — but it is **token expensive**.
+
+---
+
+## Configuration
+
+![Image of Plugin Control Panel](plugin-control-panel.jpg)   
+
+Here's what each control does and what it affects.
+
+| **SearXNG URL** | Base URL of your local SearXNG instance. Must be reachable and have the JSON API enabled [see Setup](## Setup). |
+| **Requested # of Sources** | How many sources the model tries to return. Drives the Simple Budget. The model may occasionally return fewer if it can't find enough good pages. |
+| **Max # Search Results to Check a Page** | SearXNG returns up to 25 results per page. Also directly affects Snippets Mode |
+| **Scale Default Budgets by x** | Multiplier applied to the budgets. ×0.5 = half the text back (cheaper, less detail). ×2.0 = double (more detail, more tokens). |
+| **Timeout for Captcha Detection (ms)** | How long to wait after fetching a page before deciding it's usable. Some sites just have a timeout verification system. `0` = don't wait. **Higher values add latency between every candidate check** — e.g. 10,000 ms × 10 sources ≈ up to 100 s of waiting alone. |
+| **Snippets Mode** | Customize snippets behavior in your search flow. More details below. |
+| **Fetch Entire Webpages** | Bypass budgets and returns the full cleaned pages. Token‑heavy. |
+
+### Snippets Mode, explained
+
+Snippets are the short metadata text SearXNG returns with each result which are previews to the subject but lacks substance.
+
+| Option | Behavior |
+|---|---|
+| **Fallback** | Normal search flow. Tries to fetch real pages first. Only if **nothing** is accessible does it fall back to snippets. (model will be aware of multiple sources of information.) |
+| **First Fetch, Return Best Match** | Fetches search results, sorts through for best matching result based on comparing query with title and snippets, then picks the single best matched page. (model will only know information of the one selected source.) |
+| **Snippets Only** | Never fetches pages. Returns only snippets. **Not recommended** — low substance, high token cost, and the model will choose to continue searching until it gets enough snippets to answer the query. |
+
+---
 
 ## Setup
-rzk's original readme is near the bottom of the readme
 
-## LM Studio Plugin Options Descriptions
-1) Searxng URL - points to where your Searxng is hosted.
-2) Requested # of Sources - controls the ideal amount of sources you wish to retrieve. On occasion a model may choose a lower number, but most often tries to satisfy your request.
-3) Max # Search Results to Check a Page - controls how many search results you want to iterate through to meet the amount stated in your "Retrieve up to # of Sources". There are 25 results maximum.
-	- if you set this to 10, it will only iterate through 10 of the 25 search results. If your Source request isn't satisfied the model will continue to search on page 2, iterating over the first 10.
-4) Scale Default Budgets by - controls the multiplier applied to the budget defaults I set, reference the simple and wide-net budget tables below.
-5) Timeout for Captcha Detection - controls how long you wish to wait for Captchas to timeout (auto verify Captchas) before checking if the web page returns any content.
-	- I set it to 3000ms = 3seconds. That seemed plenty enough to pass auto verify Captchas for myself. If you set it to 0secs you're saying to the fetcher you don't care to catch any content from auto verify web pages.
-	- Just know that if you set it to 10secs, you're accepting you will wait 10 seconds in-between each candidate check. For example, if you do a 10sec timeout + 10 sources requested, 
-	- if the first 10 are positive hits with no reasons for rejections, you'll be waiting 100 seconds for those 10 fetches.
-6) Snippets only - toggle on if you want to only fetch snippets from the search results. The snippet count returned is affected by the "Max # Search Results to Check a Page".
-	- I'll caution you against this, snippet information is just metadata info, I've seen it's contents, it's severely lacking in substance and consumes a bunch of tokens for it.
-	- If the model cannot give you a good answer based on that metadata, it will fetch again until it gets enough to answer your question. This is costly. This is one of the key reasons I rewrote rzk's version.
-7) Fetch Entire web pages - toggle on to fetch entire web pages without budget constraints. This includes when you ask the model to pull a specific URL,
-	- and if you ask a generalized query, it will pull the entire page of each source that it accepts to satisfy your "Requested # of Sources". Mostly the entire web page minus the junk.
-	- Where I did try saving you token count though is by still filtering the unnecessary elements like headers, footers and the like, along with sections that are just reference links to other sources.
-8) research_web - must remain enabled/checked.
+### 1. Run a local SearXNG
 
-## Things I added
-Total rework to logic.
-1. Within LM Studio user can: 
-	- set number of sources to return
-	- set max number of results checked per search page
-	- set how long to wait for potential "wait" Captchas to expire
-	- toggle to fetch entire web pages, word of warning, this will consume a lot of tokens
-	- toggle for snippets (not recommended, but I believe in freedom, it eats up tokens for metadata content of low quality info)
-	- scale budgets increase or decrease budgets of my simple and wide-net budget systems
+You need SearXNG installed and running and running locally (e.g. at `http://localhost:8081` to prevent possible conflicts with other services)
 
-2. You can now paste a URL in the message and the model will go retrieve their content to put into context. Limited to the first 4 URLs per message.
+### 2. Enable the JSON API
 
-3. Smarter searches and pulls:
-	- To save tokens two budgeting system were added which will smartly fetch data.
-	- The amount of retrieve sources affects your budget.
-	- The size of the whole web page you try to fetch is also affected by budget constraints.
-	- If you feel like the data your model received is inadequate because of the budget constraints you can toggle on the, Fetch Entire Webpage, this will be token expensive.
-	- The system works like this...
-		[start] you send a query
-		-> model takes your query and uses Searxng
-		-> Searxng returns 25 results (# you set)
-		-> now those 25 results will be increment through, rejecting bad candidate web pages that are Captcha protected/lacking substance/inaccessible/incompatible with Mozilla-readability
-		-> to find 3 acceptable candidates (# you set)
-		-> those 3 candidates will be cleaned (removed tags/reference,citation sections/headers/footers/etc) and a relevancy scorer applied to target relevant and it's neighboring paragraphs based on keywords used in your query
-		-> because the tool is doing a multi-search, a SIMPLE budget system will be applied to return X amount of characters per source (refer to table below):
-			
-			[       Simple Budget Table        ]
-			[#_Of_Sources | Total_Characters_Returned]
-			[  1   | 2000 ] 2000 per source
-			[  2   | 3000 ] 1500 per source
-			[  3   | 4000 ] 1333 per source (default)
-			[  4   | 5000 ] 1250 per source
-			[ 5-7  | 6300 ] 900 per source @ 7
-			[ 8-10 | 8000 ] 800 per source @ 10
-		
-		-> if the user instead provides a URL, for example Wikipedia, or asks the model to fetch a specific Wikipedia topic, it will use a WIDE-NET type of budgeting system for that web page retrieval.
-		Because it is a single-search query.
-		[end] model puts web pages into context and answer the user's query
-
-	- I had the model perform some tests with the WIDE-NET budgeting on some Wikipedia pages, I had it fetch, in separate chats, the full page(18k tokens) and then fetch with the WIDE-NET(5k tokens).
-		I asked it how the data it got back compared to each other, most often it said the WIDE-NET had ~80% of the relevant information it needed for it's response compared to the full page fetch. The info it didn't
-		have was just finer details so it couldn't provide in-depth details on those with confidence, but it knew the content was already there based off of enough surrounding context.
-					
-					[       Wide-Net Budget Table       ]
-			[(Char_Budget/Char_Count_Full_Webpage) | Char_Budget ]
-						[  <= 40%  | 13000 ] Budget allocation = 25% to beginning, 20% per areas around the 25%, 50%, and 75% marks, 15% to end
-						[ 41%-70%  | 8000  ] Budget allocation = 25% to beginning, 65% to middle, 10% to end
-						[ 71-100%  | 5000  ] Budget allocation = 25% to beginning, 55% to middle, 20% to end
-
-4. Don't like my default budgets? scale their defaults to how you like between x0.1 to x2.0, default is x1.0. There is a "Fetch Entire Webpage" toggle if you don't want any budgets. Budgeting goal's to save tokens.
-
-5. Added a rough Captcha detection system which will prevent the model from wasting a pull or candidate slot on a Captcha protected site.
-
-6. Added a stack of cleaners that will scrub tags, scripts, reference and citation sections, etc. Basically scrubbed out as many things that would consume token count if it made it back to the model.
-
-7. Fine tuned the tool description so model doesn't misbehave by queuing many searches or have other odd tendencies. rzk's original pulled snippets even if it was going to research, wasting tokens.
-
-8. Set snippets as the fallback if no web pages are accessible. Model will inform you if it's answering based only on snippets. I highly advise against snippets. Low substance, high tokens.
-	- Your model may queue up many research_web search queries based on the uncertainties it has, based on just reading snippets and trying to bridge the missing pieces in it's knowledge.
-
-9. Search is no longer limited to just page 1 results. If necessary, due to lack of candidates, it will seek results of the next page. 
-
-10. Fuzzy search, not 100% reliable but "mostly" reliable, because it depends entirely on if the model wishes to do so, but you can ask it "i want you to fetch the Wikipedia american red robin" (not a mistypo, I wanted to see if the model understood)
-	- you can also say "fetch me an article from tom's hardware about the rtx 5050's specs"
-	- it will first research_web for the first search page, and if it finds the relevant web page similar to your request it will research_web that URL and pull it into context and summarize it.
-	- When you ask the model a generalized "fetch me" request, it will call the tool and will give it's response and sources,
-	- if you want it to fetch one of the sources it just mentioned, you can ask it a follow up, "can you fetch me the TechTimes article?" and it will go fetch it into context.
-	- content fetched into the model is not meant to be pretty/organized, it's for the model. If you're wanting organized text, ask the model to organize it for you or read it in your browser using the source link it provides.
-
-## Bug or feature?
-When I have the content run through my budgeting system, I added obvious signs hinting the model that some sections were omitted and how many budgeted characters were pulled into context of the total.
-The model might let you know that there is some info missing and offer you the choice to ask it to go and grab the rest.
-It can not, and will not be able to get the omitted parts, unless you enable Fetch Entire Webpage.
-So if you have Fetch Entire Webpage disabled, do not let it waste it's tokens trying to pull the same page again. Decline it's offer.
-I don't want to waste input tokens in the description to add this awareness to the model and potentially inhibiting it from asking follow ups.
-You're in the driver seat, you are able to control the toggle.
-
-## Afterwords
-If you want to edit my logic or improve it, feel free to do so, but a word of warning from what I can tell every piece and order of function execution matters. Also if you alter or try to compact my tool
-description, the tool will cease to function as I intended. Believe me I tried to compact the description as much as possible, and tested it many times if it could be relied on without all those words or lines (striving minimal tokens),
-but just messing with their wording would make the tool act up and be unreliable or the model started taking the tool description as suggestions, rather than orders it must follow.
-
-Thanks [rzk](https://lmstudio.ai/rzk/Searxng-search) for your original work.
-Below are his original instructions to setting things up for the plugin.
-
-____________________________________________________________________________________________________________________________
-____________________________________________________________________________________________________________________________
-
-# Searxng Search Plugin for LM Studio (rzk's original readme)
-
-This plugin enables LM Studio assistants to search the web using a local [Searxng](https://github.com/Searxng/Searxng) instance, providing privacy-focused metasearch capabilities similar to how Vane (Perplexica) utilizes Searxng.
-
-## Prerequisites
-
-1. **Running Searxng Instance**: You must have Searxng installed and running locally (e.g. at `http://localhost:8081` to prevent possible conflicts with other services)
-2. **JSON API Enabled**: Ensure your Searxng `settings.yml` includes:
-   
-   ```yaml
-   search:
-     formats:
-       - html
-       - json
-   ```
-
-## Installation
-
-1. Download this plugin from LM Studio Hub or install manually
-2. Configure the plugin settings in LM Studio:
-   - Searxng URL: Your instance URL (default: [http://localhost:8081](http://localhost:8080/)) (if a different port is used, update "config.ts" accordingly. Note that current port setting is "8081" to prevent possible conflicts with other services)
-   - Default Results Count: How many results to return per query (1-20)
-   - Timeout: Request timeout in milliseconds
-
-## Usage
-
-Once installed, the plugin provides two tools:
-
-- `search_web`: Search the internet using Searxng
-- `fetch_page_content`: Retrieve and extract text from specific URLs
-
-The assistant will automatically invoke these tools when web search is needed.
-
-
-
-## Project Structure
+JSON API Enabled: Ensure your SearXNG `settings.yml` includes:
 
 ```
-lms-plugin-searxng/
+search:
+  formats:
+    - html
+    - json
+```
+
+Restart SearXNG after editing.
+
+### 3. Install the plugin in LM Studio
+
+From Website: Install from the LM Studio Hub, then open the plugin's settings and point **SearXNG URL** at your instance.
+
+From Terminal: Open powershell/terminal, navigate to root folder of the plugin you downloaded where you see the README, package, and manifest. enter in `lms dev -i -y` . Plugin should now be available in LM Studio.
+
+Make sure the **`research_web`** tool is enabled in the plugin's **Tools** section (this is mandatory — if it's off, the model can't use the plugin at all).
+
+---
+
+## Using it
+
+Just talk to your model normally. A few patterns that work well:
+
+- **Paste a URL or URLs** — *"Here's an article, summarize it: <url>"* (up to 4 URLs per message). The model fetches and reads each directly.
+- **Named source, fuzzy** — *"fetch the Wikipedia page for the American Red Robin."* The model searches, finds the matching page, and pulls it in.
+- **Vendor‑specific** — *"find an article from Tom's Hardware about the RTX 5050 specs."* It searches, matches the source by name/domain/keywords, and fetches it.
+- **Follow‑up** — after an answer the model should cite it's sources you can ask, *"can you fetch the TechTimes article you mentioned?"* It goes and pulls that specific source.
+
+### Citations
+
+Every response should end with sources formatted as `[DOMAIN](URL)`. Use the clickable links to open the original in your browser if you want to read the full text — the content handed to the model is intentionally **not** pretty‑formatted; it's optimized for the model, not for your eyes.
+I have found some rebellious models may have a 50/50 chance not to cite their sources as instructed, but the competent ones will make sure to do so.
+
+---
+
+## How it works (the technical bits)
+
+Useful if you want to read or modify the logic (`src/toolsProvider.ts`).
+
+**Pipeline (normal research):**
+
+```
+query
+ → SearXNG JSON search (page N, up to 25 results, capped by "Max # to Check")
+ → for each candidate, sequentially:
+      · reject on: HTTP 401/403/429/5xx, timeout, active CAPTCHA/challenge,
+        <150 readable words, duplicate domain
+      · keep the first N that pass (N = "Requested # of Sources")
+ → for each kept source:
+      · extract text via Mozilla Readability after DOMPurify sanitize
+      · strip reference/citation/bibliography/author‑bio sections/token wasters
+      · selectRelevantContent(): score paragraphs by query‑term overlap,
+        return highest‑scoring paragraphs + 1 neighbor each, within budget
+ → emit <NML_FETCH> or <SO_FETCH> or <SF_FETCH> with per‑source Title / URL / Content
+```
+
+**Notable behaviors:**
+
+- **Multi‑page search.** If page 1 doesn't yield enough usable candidates, it continues to page 2, 3, … and tells you the next page number if it ran short.
+- **Forced domain diversity.** It never returns two sources from the same hostname.
+- **CAPTCHA detection.** A pattern matcher (`detectActiveChallenge`) catches "verify you're human", "I'm not a robot", slider/puzzle/turnstile, etc. A hit is rejected rather than wasting a candidate slot.
+- **Cleaners.** DOMPurify → strip reference/citation/footnote/author‑bio/external‑link sections by `id`/`class`/`aria`/heading text → Readability → tag/entity/whitespace normalization. Goal: remove everything that burns tokens without carrying meaning.
+- **Single‑page fetches** (user‑pasted URLs, article is assumed relevant, `snippets_first` best match) go through `getSmarterFilter` (the Wide‑Net sampler) instead of the keyword selector.
+- **Fallback.** If zero pages are accessible, it returns the snippets and tells the model to flag that it's information is from snippets only.
+
+**Project structure:**
+
+```
+lms-plugin-better-searxng/
 ├── manifest.json
 ├── package.json
 ├── tsconfig.json
 ├── README.md
 └── src/
     ├── index.ts
-    ├── config.ts
-    └── toolsProvider.ts
+    ├── config.ts          # settings schema + defaults
+    └── toolsProvider.ts   # the research_web tool + all logic
 ```
+
+---
 
 ## Troubleshooting
 
-- **"JSON format not enabled"**: Ensure your Searxng settings.yml includes `json` in search formats
-- **Connection timeouts**: Verify Searxng is running and accessible at the configured URL
-- **No results**: Check that Searxng has search engines enabled in its configuration
+| Symptom | Fix |
+|---|---|
+| `JSON format not enabled` / no results from SearXNG | Add `json` to `search.formats` in `settings.yml`, restart SearXNG. |
+| Timeouts / connection errors | Confirm SearXNG is up and the **SearXNG URL** matches (host + port). Confirm you're not blocked by all search engines. |
+| Model never searches | Ensure the `research_web` tool is **enabled** in the plugin's Tools section. |
+| Too little detail in answers | Raise **Scale Default Budgets**, or turn on **Fetch Entire Webpages** (costs more tokens). |
+| Too many tokens / context filling up | Lower the scale factor, lower **Requested # of Sources**, keep **Fetch Entire Webpages** off. |
 
+### If you want to modify the logic
 
+Please be careful. The ordering of steps, the budget numbers, and especially the **tool description string** are load‑bearing. The description is tuned to stop the model from spamming repeated searches and to treat the instructions as hard rules rather than suggestions — shortening or rewording it may change behavior and can break it. Test thoroughly and deliberately if you change anything.
 
-## Comparison with Existing Solutions
-
-Unlike the DuckDuckGo plugin which relies on DuckDuckGo's HTML scraping, this Searxng implementation offers:
-
-- Privacy control: Data never leaves your infrastructure (when using local Searxng)
-- Customizable sources: Searxng aggregates 70+ search engines configurable by the user
-- No rate limits: Local instances aren't subject to external API quotas
-- Metadata richness: Access to result scores and source engine attribution
+---
 
 ## License
 
