@@ -1,6 +1,10 @@
 # better-searxng-search (8/28/2026)
 
-[JUMP TO SETUP](##Setup)
+## Table of Contents
+- [Setup](#setup)
+- [Budget System](#the-two-budgeting-systems)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
 
 A web search plugin for **LM Studio** that searches the web through a **local [SearXNG](https://github.com/Searxng/Searxng)** instance, filters out junk, and returns only the parts of pages your model actually needs.
 
@@ -79,7 +83,7 @@ Here's what each control does and what it affects.
 
 | Option | Description |
 |---|---|
-| **SearXNG URL** | Base URL of your local SearXNG instance. Must be reachable and have the JSON API enabled [see Setup](##Setup). |
+| **SearXNG URL** | Base URL of your local SearXNG instance. Must be reachable and have the JSON API enabled [see Setup](#setup). |
 | **Requested # of Sources** | How many sources the model tries to return. Drives the Simple Budget. The model may occasionally return fewer if it can't find enough good pages. |
 | **Max # Search Results to Check a Page** | SearXNG returns up to 25 results per page. Also directly affects Snippets Mode |
 | **Scale Default Budgets by x** | Multiplier applied to the budgets. ×0.5 = half the text back (cheaper, less detail). ×2.0 = double (more detail, more tokens). |
