@@ -1,11 +1,5 @@
 # better-searxng-search (8/28/2026)
 
-## Table of Contents
-- [Setup](#setup)
-- [Budget System](#the-two-budgeting-systems)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-
 A web search plugin for **LM Studio** that searches the web through a **local [SearXNG](https://github.com/Searxng/Searxng)** instance, filters out junk, and returns only the parts of pages your model actually needs.
 
 The whole point of this plugin is **token efficiency**. A naive "search → dump the page" tool wastes context tokens. This plugin:
@@ -15,6 +9,14 @@ The whole point of this plugin is **token efficiency**. A naive "search → dump
 - **scrubs** boilerplate before anything reaches the model.
 
 > This is a rework of [rzk's Searxng plugin](https://lmstudio.ai/rzk/Searxng-search) but with better logic and customization. Thanks rzk.
+
+---
+
+## Table of Contents
+- [Setup](#setup)
+- [Budget System](#the-two-budgeting-systems)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
