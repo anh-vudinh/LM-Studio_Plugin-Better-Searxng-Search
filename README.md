@@ -114,6 +114,7 @@ Here's what each control does and what it affects.
 | Option | Description |
 |---|---|
 | **SearXNG URL** | Base URL of your local SearXNG instance. Must be reachable and have the JSON API enabled [see Setup](#setup). |
+| **EX: Summarize Search Results Before Return**| Asks the model to summarize the searched webpage results before it's handed back to the model (put into context) to draft its response. |
 | **Requested # of Sources** | How many sources the model tries to return. Drives the Simple Budget. The model may occasionally return fewer if it can't find enough good pages. |
 | **Max # Search Results to Check a Page** | SearXNG returns up to 25 results per page. Also directly affects Snippets Mode |
 | **Scale Default Budgets by x** | Multiplier applied to the budgets. ×0.5 = half the text back (cheaper, less detail). ×2.0 = double (more detail, more tokens). |
