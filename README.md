@@ -1,4 +1,4 @@
-# better-searxng-search (8/28/2026)
+# better-searxng-search LM STUDIO PLUGIN
 
 A web search plugin for **LM Studio** that searches the web through a **local [SearXNG](https://github.com/Searxng/Searxng)** instance, filters out junk, and returns only the parts of pages your model actually needs.
 
@@ -9,6 +9,32 @@ The whole point of this plugin is **token efficiency**. A naive "search → dump
 - **scrubs** boilerplate before anything reaches the model.
 
 > This is a rework of [rzk's Searxng plugin](https://lmstudio.ai/rzk/Searxng-search) but with better logic and customization. Thanks rzk.
+
+---
+>#### ***NEW***
+>
+>Added an experimental feature [Summmarize Search Results Before Return](#configuration) letting the backend run the results through the model at a temperature of 0.3 for it to make one consolidated summary of all the webpages collected before it brings it into context. Lowers the tokens used of the context window by a good amount, and should have the answer to your query, but remember it's a summary based entirely on the model's judgement. The model's final response would technically be a summary of a summary. It may lack extra details if you poke for more answers.
+>
+> Trade off: pre-filtered information, depends on model's judgement, and a bit more backend processing delay to gain less token usage of the context window.
+>
+><details>
+><summary>Click to expand image</summary>
+><img src="example-summary-of-a-summary.jpg" alt="Image of experiemental feature summary of a summary">
+></details>
+>
+---
+
+## Comparison of Search methods
+Fetch: `https://en.wikipedia.org/wiki/American_robin`
+| Method | Tokens Used of Context Window | Total Chars Returned | Char Limits? |
+|:--------:|:--------:|:--------:|:--------:|
+| Experimental Pre-Summarize | ~3400  | 8,644 | No limits imposed |
+| Default Budgeting System | ~4300 | 13,000 | 13,000 |
+| Fetch Entire Webpage | ~6400 | 20,904 | No limits imposed |
+
+Ran multiple times and until the comparisons I saw showed the response length and thinking length (character count) were relatively the same, so the difference would mostly be the fetch content pulled in.
+
+Test them out, choose whichever you like.
 
 ---
 
@@ -180,19 +206,6 @@ query
 - **Single‑page fetches** (user‑pasted URLs, article is assumed relevant, `snippets_first` best match) go through `getSmarterFilter` (the Wide‑Net sampler) instead of the keyword selector.
 - **Fallback.** If zero pages are accessible, it returns the snippets and tells the model to flag that it's information is from snippets only.
 
-**Project structure:**
-
-```
-lms-plugin-better-searxng/
-├── manifest.json
-├── package.json
-├── tsconfig.json
-├── README.md
-└── src/
-    ├── index.ts
-    ├── config.ts          # settings schema + defaults
-    └── toolsProvider.ts   # the research_web tool + all logic
-```
 
 ---
 

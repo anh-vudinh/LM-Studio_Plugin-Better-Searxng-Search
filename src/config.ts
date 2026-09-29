@@ -11,6 +11,17 @@ export const configSchematics = createConfigSchematics()
     "http://localhost:8081"
   )
   .field(
+    "askModelToSummarizeSearchResults",
+    "boolean",
+    {
+      displayName: "EXPERIMENTAL: Summarize Search Results Before Return",
+      subtitle:
+        "Summarize the returned webpages before handing it to the model to generate a response.",
+      hint: "This is one layer extra, to first run the fetched webpages through the model to summary before it's pulled into context. The model will then base it's response on the summary rather than the actual webpages."
+    },
+    false
+  )
+  .field(
     "defaultSearchCount",
     "numeric",
     {

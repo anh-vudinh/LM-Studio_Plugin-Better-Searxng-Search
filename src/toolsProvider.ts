@@ -1,6 +1,7 @@
 import { tool, Tool, ToolsProviderController } from "@lmstudio/sdk";
 import { z } from "zod";
 import { configSchematics } from "./config";
+import { askModelToSummarizeSearchResults } from "./askModelToSummarizeSearchResults";
 import stopwords from "@stdlib/datasets-stopwords-en";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
@@ -42,6 +43,335 @@ interface RejectedSource {
 
 // Research pipeline settings.
 let currentNextPage = 1;  //holding the nextpage number outside of tool if user requests model to continue pulling more results
+
+/**
+ * research_web tool
+ */
+export async function toolsProvider(
+  ctl: ToolsProviderController
+): Promise<Tool[]> {
+  const tools: Tool[] = [];
+  const config = ctl.getPluginConfig(configSchematics);
+  const searxngUrl = config.get("searxngUrl") as string;
+  const defaultSearchCount = config.get("defaultSearchCount") as number;
+  const waitCaptcha = config.get("waitCaptchaTimeout") as number;
+  const fetchFullPage = config.get("fetchFullPage") as boolean;
+  const checkCandidatesCount = config.get("checkCandidatesCount") as number;
+  const snippetsModeSelect = config.get("snippetsModeSelect") as string;
+  const budgetScaler = config.get("budgetScaler") as number;
+  const shouldModelSummarizeSearchResults = config.get("askModelToSummarizeSearchResults") as boolean;
+
+  const researchTool = tool({
+    name: "research_web",
+    description:
+      "If user mentions something unfamiliar, it may be beyond your knowledge cutoff;" +
+      "use research_web for relevant information before dismissing or correcting their claim."+
+      "No extra research_web tool calls until the previous research_web results are evaluated." +
+      "If user message includes urls put urls into the 'urls' array." +
+      "After two consecutive failures to fetch or no results found, stop and inform user." +
+      "It's non-optional, cite sources at the end of your response, formatted as [DOMAIN](URL)." +
+      "Distinct stories should remain separated.",
+    parameters: {
+      query: z
+        .string()
+        .describe("The topic to research"),
+      time_range: z
+        .string()
+        .optional()
+        .describe("Freshness filter: 'day', 'week', 'month', or 'year'"),
+      defaultSearchCount: z
+        .number()
+        .min(1)
+        .max(defaultSearchCount)
+        .default(1)
+        .describe("Quantity of sources user ideally wants"),
+      urls: z
+        .array(z.string().url())
+        .max(4)
+        .default([])
+        .describe("List of URLs provided by user to fetch"),
+    },
+    implementation: async (params: {
+      query: string;
+      time_range?: string;
+      defaultSearchCount: number;
+      urls?: string[];
+    }) => {
+      const { query, time_range, defaultSearchCount, urls } = params;
+      const page = 1;
+      const timeout = 10000;
+
+      try {
+        // ----------------------------------------------------------
+        // States that persists across search pages
+        // ----------------------------------------------------------
+        const accepted: AcceptedSource[] = [];
+        const rejected: RejectedSource[] = [];
+        const acceptedDomains = new Set<string>();
+        const sources = defaultSearchCount;
+
+        let currentSearchPage = page;
+        let candidates: SearXNGResult[] = [];
+        let candidateIndex = 0;
+        let totalCandidatesChecked = 0;
+
+        // ----------------------------------------------------------
+        // User sent direct URL links in their message
+        // Retrieve them as sources for context
+        // ----------------------------------------------------------
+        if (urls && urls.length > 0){
+          return await handleUserUrlInject(
+            urls,
+            fetchFullPage,
+            budgetScaler,
+            shouldModelSummarizeSearchResults,
+            ctl,
+            query,
+          );
+        }
+
+        // ----------------------------------------------------------
+        // User wants snippets only
+        // ----------------------------------------------------------
+        if (snippetsModeSelect === "snippets_only"){
+          return await handleSnippetsOnly(
+            candidates,
+            currentSearchPage,
+            query,
+            searxngUrl,
+            checkCandidatesCount,
+            timeout,
+            time_range
+          );
+        }
+
+        // ----------------------------------------------------------
+        // User wants snippets first
+        // ----------------------------------------------------------
+        if (snippetsModeSelect === "snippets_first"){
+          return await handleSnippetsFirst(
+            candidates,
+            currentSearchPage,
+            query,
+            searxngUrl,
+            checkCandidatesCount,
+            timeout,
+            fetchFullPage,
+            budgetScaler,
+            shouldModelSummarizeSearchResults,
+            time_range,
+          );
+        }
+
+        // ----------------------------------------------------------
+        // [Start] Normal research_web Route - Get the first page
+        // ----------------------------------------------------------
+        candidates = await fetchSearchPage(
+          currentSearchPage, 
+          query, 
+          time_range ?? "", 
+          searxngUrl, 
+          checkCandidatesCount, 
+          timeout
+        );
+
+        if (candidates.length === 0) {
+          return `No search results found for "${query}".`;
+        }
+
+        console.log(
+          `research_web: received ` +
+          `${candidates.length} candidates from page ` +
+          `${currentSearchPage}`
+        );
+
+        // ----------------------------------------------------------
+        // Check candidates sequentially
+        //
+        // If we exhaust the current page before reaching
+        // requested sources, fetch the next page and continue
+        // ----------------------------------------------------------
+        while (accepted.length < sources) {
+          if (candidateIndex >= candidates.length) {
+            const nextPage = currentSearchPage + 1;
+
+            console.log(
+              `research_web: exhausted page ` +
+              `${currentSearchPage} with ` +
+              `${accepted.length}/${sources} accepted. ` +
+              `Searching page ${nextPage}.`
+            );
+
+            const nextCandidates = await fetchSearchPage(nextPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
+
+            // No more search results.
+            if (nextCandidates.length === 0) {
+              console.log(
+                `research_web: page ${nextPage} returned no candidates.`
+              );
+              break;
+            }
+
+            currentSearchPage = nextPage;
+            candidates = nextCandidates;
+            candidateIndex = 0;
+
+            console.log(
+              `research_web: received ` +
+              `${candidates.length} candidates from page ` +
+              `${currentSearchPage}`
+            );
+
+            continue;
+          }
+
+          // --------------------------------------------------------
+          // Process next candidate
+          // --------------------------------------------------------
+          const candidate = candidates[candidateIndex];
+          candidateIndex++;
+          totalCandidatesChecked++;
+
+          let domain: string;
+
+          try {
+            domain = new URL(candidate.url).hostname.toLowerCase();
+          } catch {
+            rejected.push({
+              title: candidate.title,
+              url: candidate.url,
+              reason: "invalid URL",
+            });
+            continue;
+          }
+
+          // Keep the source set diverse.
+          if (acceptedDomains.has(domain)) {
+            rejected.push({
+              title: candidate.title,
+              url: candidate.url,
+              reason: "duplicate domain",
+            });
+            continue;
+          }
+
+          console.log(
+            `research_web: CHECKING candidate(${candidateIndex})_p${currentSearchPage}: ` +
+            `${candidate.url}`
+          );
+
+          const result = await fetchCandidate(
+            candidate,
+            timeout,
+            query,
+            defaultSearchCount,
+            waitCaptcha,
+            fetchFullPage,
+            budgetScaler,
+            shouldModelSummarizeSearchResults,
+          );
+
+          if (!result.usable) {
+            console.log(
+              `research_web: REJECTED candidate(${candidateIndex})_p${currentSearchPage}: ` +
+              `${result.reason}`
+            );
+
+            rejected.push({
+              title: candidate.title,
+              url: candidate.url,
+              reason: result.reason
+            });
+            continue;
+          }
+
+          // --------------------------------------------------------
+          // ACCEPTED SOURCE
+          // --------------------------------------------------------
+
+          acceptedDomains.add(domain);
+
+          accepted.push({
+            title: result.title,
+            url: result.url,
+            domain: result.domain,
+            engine: result.engine,
+            score: result.score,
+            contentSource: "FETCHED_PAGE",
+            content: result.content
+          });
+
+          console.log(
+            `research_web: ACCEPTED candidate(${candidateIndex})_p${currentSearchPage}: ` +
+            `Accepted Count: ${accepted.length}/${sources}`
+          );
+        }
+
+        // ----------------------------------------------------------
+        // Update the externally tracked page
+        // ----------------------------------------------------------
+
+        currentNextPage = currentSearchPage + 1;
+        
+        // ----------------------------------------------------------
+        // Return research package
+        // ----------------------------------------------------------
+
+        if (accepted.length === 0) {
+          const snippetResults = await fetchSnippets(candidates);
+
+          return (
+            `No accessible pages. Search snippets: ${snippetResults}`
+          );
+        }
+
+        let output = `<NML_FETCH> Query: ${query}`;
+
+        accepted.forEach((source, index) => {
+          output +=
+            ` SOURCE[${index + 1}] Title:${source.title} URL:${source.url} Content:${source.content}\n`;
+        });
+
+        if (accepted.length < sources) {
+          output +=
+            `Only ${accepted.length} usable sources were found. ` +
+            `The next search page is ${currentNextPage}.`;
+        }
+
+        //
+        if (shouldModelSummarizeSearchResults) {
+
+          return await askModelToSummarizeSearchResults(
+            ctl.client,
+            output,
+            query
+          );
+
+        } else {
+
+          return output;
+        }
+
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          return (
+            `Research request timed out after ` +
+            `${timeout}ms. Check SearXNG at ${searxngUrl}.`
+          );
+        }
+
+        return (
+          `Error researching "${query}": ` +
+          `${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    },
+  });
+
+  tools.push(researchTool);
+
+  return tools;
+}
 
 /**
  * Pause before inspecting a successfully fetched page.
@@ -574,11 +904,12 @@ async function selectRelevantContent(
   content: string,
   query: string,
   maxLength: number,
-  fetchFullPage: boolean
+  fetchFullPage: boolean,
+  shouldModelSummarizeSearchResults: boolean,
 ): Promise<string> {
   
   // If the content is less than the budget, or user wants the full page fetched no need to filter send it completely through
-  if (content.length <= maxLength || fetchFullPage) {
+  if (content.length <= maxLength || fetchFullPage || shouldModelSummarizeSearchResults) {
     return content;
   }
 
@@ -725,12 +1056,13 @@ async function selectRelevantContent(
 async function getSmarterFilter(
   text: string, 
   fetchFullPage: boolean, 
-  budgetScaler: number
+  budgetScaler: number,
+  shouldModelSummarizeSearchResults: boolean,
 ): Promise<string> {
     const maxLength = 5000 * budgetScaler;
 
     //If user intentionally turned on Fetch Full Page, send it all back without applying budgets
-    if(fetchFullPage) {
+    if(fetchFullPage || shouldModelSummarizeSearchResults) {
       return text;
     }
 
@@ -950,7 +1282,8 @@ async function fetchCandidate(
   searchCount: number,
   waitCaptcha: number,
   fetchFullPage: boolean,
-  budgetScaler: number
+  budgetScaler: number,
+  shouldModelSummarizeSearchResults: boolean,
 ): Promise<
   | {
       usable: true;
@@ -1003,7 +1336,8 @@ async function fetchCandidate(
       content,
       query,
       availableLimit,
-      fetchFullPage
+      fetchFullPage,
+      shouldModelSummarizeSearchResults,
     );
 
     return {
@@ -1059,7 +1393,8 @@ async function fetchSnippets(
 async function fetchPageContent(
   url: string,
   fetchFullPage: boolean,
-  budgetScaler: number
+  budgetScaler: number,
+  shouldModelSummarizeSearchResults: boolean,
 ): Promise<string> {
   const response = await fetch(url, {
     headers: {
@@ -1076,7 +1411,7 @@ async function fetchPageContent(
 
   const html = await response.text();
   let text = extractTextNoQuery(html);
-  const budgetedText = await getSmarterFilter(text, fetchFullPage, budgetScaler);
+  const budgetedText = await getSmarterFilter(text, fetchFullPage, budgetScaler, shouldModelSummarizeSearchResults);
 
   return budgetedText;
 }
@@ -1088,13 +1423,24 @@ async function fetchPageContent(
 async function handleUserUrlInject(
   urls: string[],
   fetchFullPage: boolean,
-  budgetScaler: number
+  budgetScaler: number,
+  shouldModelSummarizeSearchResults: boolean,
+  ctl: ToolsProviderController,
+  query: string,
 ): Promise<string> {
     const results = await Promise.all(
       urls.map(async (url) => {
         try {
           const cleanUrl = url.replace(/^["'](.*)["']$/, '$1');
-          const content = await fetchPageContent(cleanUrl, fetchFullPage, budgetScaler);
+          const content = await fetchPageContent(cleanUrl, fetchFullPage, budgetScaler, shouldModelSummarizeSearchResults);
+
+          if(shouldModelSummarizeSearchResults) {
+            return await askModelToSummarizeSearchResults(
+              ctl.client,
+              content,
+              query
+            );
+          }
           return `<UI_Fetch> URL:${url} Content:${content}`;
         } catch (error) {
           return `<UI_Fetch> URL:${url} Error fetching page:${error instanceof Error? error.message : String(error)}`;
@@ -1143,7 +1489,8 @@ async function handleSnippetsFirst(
   timeout: number,
   fetchFullPage: boolean,
   budgetScaler: number,
-  time_range?: string
+  shouldModelSummarizeSearchResults: boolean,
+  time_range?: string,
 ): Promise<string> {
     candidates = await fetchSearchPage(currentSearchPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
 
@@ -1312,318 +1659,7 @@ async function handleSnippetsFirst(
     scoredCandidates.sort((a, b) => b.score - a.score);
 
     const bestCandidate = scoredCandidates[0];
-    const budgetedText = await getSmarterFilter(bestCandidate.content, fetchFullPage, budgetScaler);
+    const budgetedText = await getSmarterFilter(bestCandidate.content, fetchFullPage, budgetScaler, shouldModelSummarizeSearchResults);
 
     return `<SF_Fetch> Title:${bestCandidate.candidate.title} URL:${bestCandidate.candidate.url} Content:${budgetedText}`;
-}
-
-/**
- * research_web tool
- */
-export async function toolsProvider(
-  ctl: ToolsProviderController
-): Promise<Tool[]> {
-  const tools: Tool[] = [];
-  const config = ctl.getPluginConfig(configSchematics);
-  const searxngUrl = config.get("searxngUrl") as string;
-  const defaultSearchCount = config.get("defaultSearchCount") as number;
-  const waitCaptcha = config.get("waitCaptchaTimeout") as number;
-  const fetchFullPage = config.get("fetchFullPage") as boolean;
-  const checkCandidatesCount = config.get("checkCandidatesCount") as number;
-  const snippetsModeSelect = config.get("snippetsModeSelect") as string;
-  const budgetScaler = config.get("budgetScaler") as number;
-
-  const researchTool = tool({
-    name: "research_web",
-    description:
-      "If user mentions something unfamiliar, it may be beyond your knowledge cutoff;" +
-      "use research_web for relevant information before dismissing or correcting their claim."+
-      "No extra research_web tool calls until the previous research_web results are evaluated." +
-      "If user message includes urls put urls into the 'urls' array." +
-      "After two consecutive failures to fetch or no results found, stop and inform user." +
-      "It's non-optional, cite sources at the end of your response, formatted as [DOMAIN](URL)." +
-      "Distinct stories should remain separated.",
-    parameters: {
-      query: z
-        .string()
-        .describe("The topic to research"),
-      time_range: z
-        .string()
-        .optional()
-        .describe("Freshness filter: 'day', 'week', 'month', or 'year'"),
-      defaultSearchCount: z
-        .number()
-        .min(1)
-        .max(defaultSearchCount)
-        .default(1)
-        .describe("Quantity of sources user ideally wants"),
-      urls: z
-        .array(z.string().url())
-        .max(4)
-        .default([])
-        .describe("List of URLs provided by user to fetch"),
-    },
-    implementation: async (params: {
-      query: string;
-      time_range?: string;
-      defaultSearchCount: number;
-      urls?: string[];
-    }) => {
-      const { query, time_range, defaultSearchCount, urls } = params;
-      const page = 1;
-      const timeout = 10000;
-
-      try {
-        // ----------------------------------------------------------
-        // States that persists across search pages
-        // ----------------------------------------------------------
-        const accepted: AcceptedSource[] = [];
-        const rejected: RejectedSource[] = [];
-        const acceptedDomains = new Set<string>();
-        const sources = defaultSearchCount;
-
-        let currentSearchPage = page;
-        let candidates: SearXNGResult[] = [];
-        let candidateIndex = 0;
-        let totalCandidatesChecked = 0;
-
-        // ----------------------------------------------------------
-        // User sent direct URL links in their message
-        // Retrieve them as sources for context
-        // ----------------------------------------------------------
-        if (urls && urls.length > 0){
-          return await handleUserUrlInject(
-            urls,
-            fetchFullPage,
-            budgetScaler
-          );
-        }
-
-        // ----------------------------------------------------------
-        // User wants snippets only
-        // ----------------------------------------------------------
-        if (snippetsModeSelect === "snippets_only"){
-          return await handleSnippetsOnly(
-            candidates,
-            currentSearchPage,
-            query,
-            searxngUrl,
-            checkCandidatesCount,
-            timeout,
-            time_range
-          );
-        }
-
-        // ----------------------------------------------------------
-        // User wants snippets first
-        // ----------------------------------------------------------
-        if (snippetsModeSelect === "snippets_first"){
-          return await handleSnippetsFirst(
-            candidates,
-            currentSearchPage,
-            query,
-            searxngUrl,
-            checkCandidatesCount,
-            timeout,
-            fetchFullPage,
-            budgetScaler,
-            time_range
-          );
-        }
-
-        // ----------------------------------------------------------
-        // [Start] Normal research_web Route - Get the first page
-        // ----------------------------------------------------------
-        candidates = await fetchSearchPage(
-          currentSearchPage, 
-          query, 
-          time_range ?? "", 
-          searxngUrl, 
-          checkCandidatesCount, 
-          timeout
-        );
-
-        if (candidates.length === 0) {
-          return `No search results found for "${query}".`;
-        }
-
-        console.log(
-          `research_web: received ` +
-          `${candidates.length} candidates from page ` +
-          `${currentSearchPage}`
-        );
-
-        // ----------------------------------------------------------
-        // Check candidates sequentially
-        //
-        // If we exhaust the current page before reaching
-        // requested sources, fetch the next page and continue
-        // ----------------------------------------------------------
-        while (accepted.length < sources) {
-          if (candidateIndex >= candidates.length) {
-            const nextPage = currentSearchPage + 1;
-
-            console.log(
-              `research_web: exhausted page ` +
-              `${currentSearchPage} with ` +
-              `${accepted.length}/${sources} accepted. ` +
-              `Searching page ${nextPage}.`
-            );
-
-            const nextCandidates = await fetchSearchPage(nextPage, query, time_range ?? "", searxngUrl, checkCandidatesCount, timeout);
-
-            // No more search results.
-            if (nextCandidates.length === 0) {
-              console.log(
-                `research_web: page ${nextPage} returned no candidates.`
-              );
-              break;
-            }
-
-            currentSearchPage = nextPage;
-            candidates = nextCandidates;
-            candidateIndex = 0;
-
-            console.log(
-              `research_web: received ` +
-              `${candidates.length} candidates from page ` +
-              `${currentSearchPage}`
-            );
-
-            continue;
-          }
-
-          // --------------------------------------------------------
-          // Process next candidate
-          // --------------------------------------------------------
-          const candidate = candidates[candidateIndex];
-          candidateIndex++;
-          totalCandidatesChecked++;
-
-          let domain: string;
-
-          try {
-            domain = new URL(candidate.url).hostname.toLowerCase();
-          } catch {
-            rejected.push({
-              title: candidate.title,
-              url: candidate.url,
-              reason: "invalid URL",
-            });
-            continue;
-          }
-
-          // Keep the source set diverse.
-          if (acceptedDomains.has(domain)) {
-            rejected.push({
-              title: candidate.title,
-              url: candidate.url,
-              reason: "duplicate domain",
-            });
-            continue;
-          }
-
-          console.log(
-            `research_web: CHECKING candidate(${candidateIndex})_p${currentSearchPage}: ` +
-            `${candidate.url}`
-          );
-
-          const result = await fetchCandidate(
-            candidate,
-            timeout,
-            query,
-            defaultSearchCount,
-            waitCaptcha,
-            fetchFullPage,
-            budgetScaler
-          );
-
-          if (!result.usable) {
-            console.log(
-              `research_web: REJECTED candidate(${candidateIndex})_p${currentSearchPage}: ` +
-              `${result.reason}`
-            );
-
-            rejected.push({
-              title: candidate.title,
-              url: candidate.url,
-              reason: result.reason
-            });
-            continue;
-          }
-
-          // --------------------------------------------------------
-          // ACCEPTED SOURCE
-          // --------------------------------------------------------
-
-          acceptedDomains.add(domain);
-
-          accepted.push({
-            title: result.title,
-            url: result.url,
-            domain: result.domain,
-            engine: result.engine,
-            score: result.score,
-            contentSource: "FETCHED_PAGE",
-            content: result.content
-          });
-
-          console.log(
-            `research_web: ACCEPTED candidate(${candidateIndex})_p${currentSearchPage}: ` +
-            `Accepted Count: ${accepted.length}/${sources}`
-          );
-        }
-
-        // ----------------------------------------------------------
-        // Update the externally tracked page
-        // ----------------------------------------------------------
-
-        currentNextPage = currentSearchPage + 1;
-        
-        // ----------------------------------------------------------
-        // Return research package
-        // ----------------------------------------------------------
-
-        if (accepted.length === 0) {
-          const snippetResults = await fetchSnippets(candidates);
-
-          return (
-            `No accessible pages. Search snippets: ${snippetResults}`
-          );
-        }
-
-        let output = `<NML_FETCH> Query: ${query}`;
-
-        accepted.forEach((source, index) => {
-          output +=
-            ` SOURCE[${index + 1}] Title:${source.title} URL:${source.url} Content:${source.content}\n`;
-        });
-
-        if (accepted.length < sources) {
-          output +=
-            `Only ${accepted.length} usable sources were found. ` +
-            `The next search page is ${currentNextPage}.`;
-        }
-
-        return output;
-
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          return (
-            `Research request timed out after ` +
-            `${timeout}ms. Check SearXNG at ${searxngUrl}.`
-          );
-        }
-
-        return (
-          `Error researching "${query}": ` +
-          `${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    },
-  });
-
-  tools.push(researchTool);
-
-  return tools;
 }
