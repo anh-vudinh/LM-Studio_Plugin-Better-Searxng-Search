@@ -1,5 +1,7 @@
 # better-searxng-search LM STUDIO PLUGIN
 
+[GitHub](https://github.com/anh-vudinh/LM-Studio_Plugin-Better-Searxng-Search) | [LMStudio](https://lmstudio.ai/anhuvdinh/better-searxng-search)
+
 A web search plugin for **LM Studio** that searches the web through a **local [SearXNG](https://github.com/Searxng/Searxng)** instance, filters out junk, and returns only the parts of pages your model actually needs.
 
 The whole point of this plugin is **token efficiency**. A naive "search → dump the page" tool wastes context tokens. This plugin:
